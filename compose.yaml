@@ -1,0 +1,49 @@
+name: ghorbox
+services:
+  bot:
+    image: ghorbox:1.0.0
+    build: .
+    restart: unless-stopped
+    init: true
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 512m
+    stop_grace_period: 60s
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+    volumes:
+      - type: bind
+        source: ./deploy/runtime/bot.env
+        target: /app/.env
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./deploy/runtime/data
+        target: /var/lib/feedback
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./deploy/runtime/keys
+        target: /run/feedback-keys
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./deploy/runtime/backups
+        target: /backups
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./deploy/runtime/recovery
+        target: /recovery
+        bind:
+          create_host_path: false
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,44 @@
+[Unit]
+Description=Anonymous colleague feedback Telegram bot
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=feedback
+Group=feedback
+WorkingDirectory=/etc/feedback
+Environment=DATA_DIR=/var/lib/feedback
+Environment=SECRETS_DIR=/etc/feedback/keys
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/opt/feedback/.venv/bin/python -m app.cli db-check
+ExecStart=/opt/feedback/.venv/bin/python -m app.main
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=60
+KillSignal=SIGTERM
+UMask=0077
+StateDirectory=feedback
+StateDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/feedback
+ReadOnlyPaths=/etc/feedback
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+LimitCORE=0
+TasksMax=64
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

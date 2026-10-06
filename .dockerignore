@@ -1,0 +1,13 @@
+# Allowlist: private files must never enter the build context.
+**
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!app/
+!app/**
+**/__pycache__/**
+**/*.pyc
+**/.env*
+**/keyring.json
+**/*.db*
+**/*.afb

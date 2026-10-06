@@ -1,0 +1,10 @@
+# Only for first-time keys-init; never use this override to start the bot.
+services:
+  bot:
+    volumes:
+      - type: bind
+        source: ./deploy/runtime/keys
+        target: /run/feedback-keys
+        read_only: false
+        bind:
+          create_host_path: false

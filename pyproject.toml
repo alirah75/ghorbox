@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "anonymous-colleague-feedback"
+version = "1.0.0"
+description = "Private, scope-isolated colleague feedback Telegram bot"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "aiogram>=3.31,<4",
+  "pydantic-settings>=2.10,<3",
+  "tzdata>=2025.2",
+  "SQLAlchemy>=2.0.54,<2.1",
+  "aiosqlite>=0.21,<1",
+  "alembic>=1.16,<2",
+  "cryptography>=50.0.1,<51",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.4,<10", "pytest-asyncio>=1.1,<2", "ruff>=0.12,<1"]
+
+[project.scripts]
+feedback-bot = "app.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
