@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from app.core.permissions import AccessDenied, InputError
+from app.core.permissions import MANAGE_ADMINS, AccessDenied, InputError
 from app.core.security import Purpose, Scope
 from app.database.identity_repository import IdentityRepository
 
@@ -139,6 +139,14 @@ class FeedbackService:
             query = select(users.c.id, users.c.display_name).where(
                 users.c.is_active == 1, users.c.id != actor.user_id
             )
+            if not actor.allows(*MANAGE_ADMINS):
+                group_id = await self._group_id_for_actor(conn, actor)
+                if group_id is None:
+                    return []
+                memberships = self.identity.tables["internal_group_memberships"]
+                query = query.join(memberships, memberships.c.user_id == users.c.id).where(
+                    memberships.c.group_id == group_id
+                )
             if search:
                 query = query.where(users.c.display_name.contains(search, autoescape=True))
             return [
@@ -172,7 +180,41 @@ class FeedbackService:
             raise InputError(
                 "گیرنده فعلاً آماده دریافت نیست؛ باید عضو فعال باشد و ربات را Start کند."
             )
+        if not actor.allows(*MANAGE_ADMINS):
+            group_id = await self._group_id_for_actor(conn, actor)
+            if group_id is None:
+                raise AccessDenied()
+            memberships = self.identity.tables["internal_group_memberships"]
+            permitted = (
+                await conn.execute(
+                    select(memberships.c.id).where(
+                        memberships.c.group_id == group_id,
+                        memberships.c.user_id == recipient,
+                    )
+                )
+            ).first()
+            if not permitted:
+                raise AccessDenied()
         return target
+
+    async def _group_id_for_actor(self, conn, actor):
+        groups = self.identity.tables["internal_groups"]
+        if actor.admin_id:
+            return (
+                await conn.execute(
+                    select(groups.c.id).where(
+                        groups.c.manager_admin_id == actor.admin_id, groups.c.is_active == 1
+                    )
+                )
+            ).scalar_one_or_none()
+        memberships = self.identity.tables["internal_group_memberships"]
+        return (
+            await conn.execute(
+                select(memberships.c.group_id)
+                .join(groups, groups.c.id == memberships.c.group_id)
+                .where(memberships.c.user_id == actor.user_id, groups.c.is_active == 1)
+            )
+        ).scalar_one_or_none()
 
     async def begin(self, actor_id, recipient, kind):
         if kind not in KINDS:
@@ -255,74 +297,113 @@ class FeedbackService:
                 _, state = await self._read_token(conn, actor, token)
                 if state["action"] != "confirm":
                     raise InputError("دکمه تأیید معتبر نیست.")
-                data = state["payload"]
-                target = await self._target(identity_conn, actor, data["recipient"])
-                body = validate_body(data["body"])
-                if data["kind"] not in KINDS:
-                    raise InputError("نوع بازخورد نامعتبر است.")
-                cid, mid, job = uuid4().hex, uuid4().hex, uuid4().hex
-                now = int(self.clock())
+                return await self._store_feedback(identity_conn, conn, actor, state["payload"])
+
+    async def submit_body(self, actor_id, body):
+        """Validate and persist a compose draft immediately, with no confirmation state."""
+        async with self.identity.database.transaction(write=True) as identity_conn:
+            actor = await IdentityRepository(identity_conn).authenticate(actor_id)
+            async with self.database.transaction(write=True) as conn:
+                data = await self._compose_payload(conn, actor, body)
+                return await self._store_feedback(identity_conn, conn, actor, data)
+
+    async def _compose_payload(self, conn, actor, body):
+        body = validate_body(body)
+        table = self.tables["interaction_sessions"]
+        row = (
+            (
                 await conn.execute(
-                    self.tables["conversations"]
-                    .insert()
-                    .values(
-                        id=cid,
-                        kind=data["kind"],
-                        expires_at=now + 90 * 86400,
-                        subject_cipher=self.seal(
-                            {"id": target["id"], "name": target["display_name"]},
-                            cid,
-                            "subject",
-                            Purpose.CONTENT,
-                        ),
-                        route_cipher=self.seal(
-                            {"sender": actor.user_id, "recipient": target["id"]}, cid, "route"
-                        ),
+                    select(table).where(
+                        table.c.token_hash == self.cipher.tag("draft", actor.user_id),
+                        table.c.owner_tag == self.owner(actor.user_id),
+                        table.c.expires_at > int(self.clock()),
                     )
                 )
-                for user_id, role in [(actor.user_id, "sender"), (target["id"], "recipient")]:
-                    access_id = uuid4().hex
-                    await conn.execute(
-                        self.tables["participant_access"]
-                        .insert()
-                        .values(
-                            id=access_id,
-                            conversation_id=cid,
-                            access_tag=self.cipher.tag("participant", cid, user_id),
-                            permissions_cipher=self.seal({"role": role}, access_id, "permissions"),
-                        )
-                    )
-                await conn.execute(
-                    self.tables["messages"]
-                    .insert()
-                    .values(
-                        id=mid,
-                        conversation_id=cid,
-                        sequence=1,
-                        message_type="initial",
-                        accepted_day=datetime.fromtimestamp(now, self.zone).date().isoformat(),
-                        body_cipher=self.seal(body, mid, "body", Purpose.CONTENT),
-                        direction_cipher=self.seal("sender", mid, "direction"),
-                    )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            raise InputError("پیش‌نویس منقضی شده است؛ دوباره گیرنده را انتخاب کنید.")
+        state = self.unseal(row["state_cipher"], row["id"], "session")
+        if state["action"] != "compose":
+            raise InputError("ابتدا گیرنده و نوع بازخورد را انتخاب کنید.")
+        return {**state["payload"], "body": body}
+
+    async def _store_feedback(self, identity_conn, conn, actor, data):
+        target = await self._target(identity_conn, actor, data["recipient"])
+        body = validate_body(data["body"])
+        if data["kind"] not in KINDS:
+            raise InputError("نوع بازخورد نامعتبر است.")
+        cid, mid, job = uuid4().hex, uuid4().hex, uuid4().hex
+        now = int(self.clock())
+        await conn.execute(
+            self.tables["conversations"]
+            .insert()
+            .values(
+                id=cid,
+                kind=data["kind"],
+                expires_at=now + 90 * 86400,
+                subject_cipher=self.seal(
+                    {"id": target["id"], "name": target["display_name"]},
+                    cid,
+                    "subject",
+                    Purpose.CONTENT,
+                ),
+                route_cipher=self.seal(
+                    {"sender": actor.user_id, "recipient": target["id"]}, cid, "route"
+                ),
+            )
+        )
+        for user_id, role in [(actor.user_id, "sender"), (target["id"], "recipient")]:
+            access_id = uuid4().hex
+            await conn.execute(
+                self.tables["participant_access"]
+                .insert()
+                .values(
+                    id=access_id,
+                    conversation_id=cid,
+                    access_tag=self.cipher.tag("participant", cid, user_id),
+                    permissions_cipher=self.seal({"role": role}, access_id, "permissions"),
                 )
-                await conn.execute(
-                    self.tables["outbox"]
-                    .insert()
-                    .values(
-                        id=job,
-                        message_id=mid,
-                        destination_cipher=self.seal(target["id"], job, "destination"),
-                        dedupe_key=mid,
-                        next_attempt_at=now,
-                    )
-                )
-                await self._record_contributor(conn, actor.user_id, now)
-                sessions = self.tables["interaction_sessions"]
-                await conn.execute(
-                    delete(sessions).where(sessions.c.owner_tag == self.owner(actor.user_id))
-                )
-                receipt = await self._session(conn, actor.user_id, "receipt", mid)
-                return receipt
+            )
+        await conn.execute(
+            self.tables["messages"]
+            .insert()
+            .values(
+                id=mid,
+                conversation_id=cid,
+                sequence=1,
+                message_type="initial",
+                accepted_day=datetime.fromtimestamp(now, self.zone).date().isoformat(),
+                body_cipher=self.seal(body, mid, "body", Purpose.CONTENT),
+                direction_cipher=self.seal("sender", mid, "direction"),
+            )
+        )
+        await conn.execute(
+            self.tables["outbox"]
+            .insert()
+            .values(
+                id=job,
+                message_id=mid,
+                destination_cipher=self.seal(target["id"], job, "destination"),
+                dedupe_key=mid,
+                next_attempt_at=now,
+            )
+        )
+        await self._record_contributor(conn, actor.user_id, now)
+        sessions = self.tables["interaction_sessions"]
+        await conn.execute(
+            delete(sessions).where(sessions.c.owner_tag == self.owner(actor.user_id))
+        )
+        await self._session(
+            conn,
+            actor.user_id,
+            "chat_active",
+            {"cid": cid, "manager": False},
+            draft=True,
+        )
+        return await self._session(conn, actor.user_id, "receipt", mid)
 
     async def _record_contributor(self, conn, user_id, now):
         date = datetime.fromtimestamp(now, self.zone)

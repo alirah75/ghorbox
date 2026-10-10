@@ -13,17 +13,17 @@ Suggested repository name: **`ghorbox`**.
 1. Only members registered and enabled by an administrator can use the bot.
 2. Administrators add members through Telegram's user picker; IDs are stored internally.
 3. Members select a colleague and write a criticism or suggestion.
-4. A preview lets the author confirm or cancel before submission.
-5. Recipients receive a new bot message without the author's account details.
-6. Participants can reply and browse their own conversation history.
-7. Recipients can report inappropriate messages, and participants can close conversations.
+4. After the author writes the text, it is submitted directly without another confirmation.
+5. Recipients get the anonymous text as a direct Telegram bot notification.
+6. Multiple conversations stay open; participants select one and chat anonymously without Reply.
+7. There is no report or manual-close action; inactive conversations expire automatically.
 8. External feedback has its own directory and administrators who mediate replies.
-9. Authorized administrators see the initial feedback and recipient, but not its author.
+9. Main admins see all initial feedback; internal admins see only their group's, never its author.
 10. Weekly privacy-filtered reports, encrypted backups and optional retention are included.
 
 ## Features
 
-- Persian Telegram interface, text validation, confirmation, cancellation and personal statistics.
+- Persian Telegram interface, direct text submission, pre-compose cancellation and personal statistics.
 - Internal, external and full administrator roles; separate permission to manage administrators.
 - Three SQLite databases: identity, internal feedback and external feedback.
 - Encrypted content and routing, service-level authorization and a durable delivery queue.

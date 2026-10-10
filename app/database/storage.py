@@ -21,10 +21,10 @@ from app.core.security import (
     private_directory,
     validate_storage_paths,
 )
-from app.database.schema_v1 import schema
+from app.database.schema import schema
 
 KINDS = ("identity", "internal", "external")
-REVISION = "0001"
+REVISION = "0002"
 PROBE = b"anonymous-feedback-storage-binding-v1"
 
 

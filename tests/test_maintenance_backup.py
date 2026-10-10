@@ -25,7 +25,6 @@ from app.services.statistics_service import StatisticsService
 from app.workers.delivery import DeliveryWorker
 from tests.test_conversations import internal_conversation
 from tests.test_feedback import BODY, count
-from tests.test_moderation import action, reported
 
 
 def configured(settings, tmp_path):
@@ -206,15 +205,22 @@ async def test_maintenance_preview_then_purge_foreign_key_order(feedback_service
     assert (await service.run())["conversations_to_purge"] == 0
 
 
-async def test_open_report_holds_content_and_snapshot_remains(feedback_service):
+async def test_legacy_open_report_does_not_block_retention(feedback_service):
     s = feedback_service
-    cid, rid, _ = await reported(s)
+    cid = await internal_conversation(s)
+    mid = (await ConversationService(s).thread(222, cid))["message_id"]
+    async with s.database.transaction(write=True) as conn:
+        await conn.execute(
+            s.tables["reports"]
+            .insert()
+            .values(
+                message_id=mid,
+                reporter_tag=s.cipher.tag("legacy-reporter", mid, "member"),
+                reason="insult",
+            )
+        )
     await StatisticsService(s).tick()
     await age(s, cid, 181)
-    await MaintenanceService(s).run(apply=True)
-    assert await count(s, "messages") == 1
-    assert not (await ConversationService(s).thread(222, cid))["can_reply"]
-    await action(s, 111, "mod_resolve_save", {"id": rid, "accept": False})
     await MaintenanceService(s).run(apply=True)
     assert await count(s, "messages") == 0
     assert await count(s, "reports") == 0

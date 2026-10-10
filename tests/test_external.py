@@ -58,6 +58,15 @@ async def test_external_atomic_encrypted_submission(external, feedback_service):
             assert (await external.identity.authenticate(333)).user_id not in str(rows)
 
 
+async def test_external_direct_submission_consumes_draft(external):
+    person = await external.save_person(222, "فرد خارجی مستقیم")
+    await external.begin(333, person, "suggestion")
+    mid = await external.submit_body(333, BODY)
+    assert isinstance(mid, str)
+    assert await external.draft(333) is None
+    assert await count(external, "messages") == 1
+
+
 async def test_authorization_precedes_external_queries(external, monkeypatch):
     await external.identity.set_admin(111, 333, Role.INTERNAL)
 
@@ -172,11 +181,9 @@ async def test_complete_external_user_and_admin_flow(external, feedback_service)
     await chat.click("فهرست افراد", 333)
     await chat.click("آقای آزمایش", 333)
     await chat.click("پیشنهاد", 333)
-    await chat.text(BODY, 333)
-    token = chat.button("ارسال")
-    # Dispatcher restart preserves encrypted confirmation.
+    # Dispatcher restart preserves the encrypted compose draft.
     chat = ChatHarness(external.identity, feedback_service, external)
-    await chat.feed(callback_update(user_id=333, data=token))
+    await chat.text(BODY, 333)
     assert "ثبت شد" in chat.latest[-1].text
     await chat.text("/admin", 222)
     await chat.click("مدیریت بخش خارجی", 222)

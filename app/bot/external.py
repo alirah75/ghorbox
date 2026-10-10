@@ -114,17 +114,8 @@ async def handle_external_text(message, service):
             ),
         )
         return True
-    data, token = await service.preview(actor, message.text)
-    from aiogram.types import InlineKeyboardButton
-
-    markup = await buttons(service, actor, [[("❌ لغو", "menu", None)]])
-    markup.inline_keyboard.insert(0, [InlineKeyboardButton(text="✅ ارسال", callback_data=token)])
-    await message.answer(
-        f"درباره: {data['recipient_name']}\nنوع: {KINDS[data['kind']]}\n\n{data['body']}\n\n"
-        "این متن را مدیران بخش خارجی می‌بینند. نام و نشانه‌های شناسایی خود را بررسی کنید.",
-        parse_mode=None,
-        reply_markup=markup,
-    )
+    await service.submit_body(actor, message.text)
+    await message.answer("✅ بازخورد در صندوق مدیران بخش خارجی ثبت شد. این به معنی خوانده‌شدن نیست.")
     return True
 
 

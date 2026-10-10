@@ -6,22 +6,26 @@ from enum import StrEnum
 
 class Role(StrEnum):
     INTERNAL = "internal"
+    MAIN = "full"
+    # Backward-compatible alias for installations and integrations using the old name.
     EXTERNAL = "external"
     FULL = "full"
 
 
 MANAGE_ADMINS = ("system", "manage_admins")
 MANAGE_USERS = ("internal", "manage_users")
-COMMON = ("read_feedback", "manage_reports", "view_statistics")
+COMMON = ("read_feedback", "view_statistics")
 
 
 def role_grants(role: Role) -> set[tuple[str, str]]:
     role = Role(role)
     grants = set()
-    if role in {Role.INTERNAL, Role.FULL}:
+    if role in {Role.INTERNAL, Role.MAIN}:
         grants |= {("internal", permission) for permission in (*COMMON, "manage_users")}
-    if role in {Role.EXTERNAL, Role.FULL}:
+    if role in {Role.EXTERNAL, Role.MAIN}:
         grants |= {("external", permission) for permission in (*COMMON, "manage_external_people")}
+    if role == Role.MAIN:
+        grants.add(MANAGE_ADMINS)
     return grants
 
 

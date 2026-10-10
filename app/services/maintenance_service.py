@@ -29,17 +29,11 @@ class MaintenanceService:
             )
         )
         async with s.database.transaction(write=apply) as conn:
-            open_reports = (
-                select(r.c.id)
-                .join(m, m.c.id == r.c.message_id)
-                .where(m.c.conversation_id == c.c.id, r.c.status == "open")
-                .exists()
-            )
             candidates = (
                 (
                     await conn.execute(
                         select(c.c.id)
-                        .where(c.c.updated_at <= cutoff, ~open_reports)
+                        .where(c.c.updated_at <= cutoff)
                         .order_by(c.c.updated_at, c.c.id)
                         .limit(BATCH_SIZE)
                     )

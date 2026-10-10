@@ -49,6 +49,7 @@ async def identity_service(settings, tmp_path):
 
 @pytest.fixture
 async def feedback_service(identity_service, tmp_path):
+    from app.core.permissions import Role
     from app.core.security import Keyring, Scope, ScopeCipher
     from app.database.storage import Database
     from app.services.feedback_service import FeedbackService
@@ -59,6 +60,15 @@ async def feedback_service(identity_service, tmp_path):
     await identity_service.authenticate(111, started=True)
     await identity_service.add_user(111, 222, "همکار گیرنده")
     await identity_service.add_user(111, 333, "همکار فرستنده")
+    manager_id = await identity_service.add_user(111, 999, "مدیر گروه آزمایش")
+    await identity_service.set_admin(111, 999, Role.INTERNAL)
+    group_id = await identity_service.create_internal_group(111, "گروه آزمایش", manager_id)
+    await identity_service.assign_internal_group_member(
+        111, group_id, (await identity_service.authenticate(222)).user_id
+    )
+    await identity_service.assign_internal_group_member(
+        111, group_id, (await identity_service.authenticate(333)).user_id
+    )
     await identity_service.authenticate(222, started=True)
     await identity_service.authenticate(333, started=True)
     try:

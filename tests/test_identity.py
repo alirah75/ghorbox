@@ -3,7 +3,7 @@ import asyncio
 import pytest
 from sqlalchemy import func, select
 
-from app.core.permissions import AccessDenied, InputError, Role
+from app.core.permissions import MANAGE_ADMINS, AccessDenied, InputError, Role
 from app.database.storage import Database
 from app.services.identity_service import IdentityService
 
@@ -19,6 +19,29 @@ async def test_bootstrap_is_one_time_and_environment_cannot_regrant(identity_ser
     with pytest.raises(AccessDenied):
         await service.authenticate(333)
     assert target
+
+
+async def test_main_admin_always_has_full_hierarchy_permissions(identity_service):
+    service = identity_service
+    await service.add_user(111, 222, "مدیر اصلی دوم")
+    # The legacy flag may not downgrade a main administrator.
+    await service.set_admin(111, 222, Role.MAIN, can_manage_admins=False)
+    principal = await service.authenticate(222)
+    assert principal.allows(*MANAGE_ADMINS)
+    assert principal.allows("internal", "manage_users")
+    await service.add_user(222, 333, "عضو عادی")
+    await service.set_admin(222, 333, Role.INTERNAL)
+    assert (await service.authenticate(333)).allows("internal", "read_feedback")
+
+
+async def test_internal_admin_cannot_promote_admins(identity_service):
+    service = identity_service
+    manager_id = await service.add_user(111, 222, "مدیر داخلی")
+    await service.set_admin(111, 222, Role.INTERNAL)
+    await service.create_internal_group(111, "گروه مدیر داخلی", manager_id)
+    await service.add_user(222, 333, "عضو عادی")
+    with pytest.raises(AccessDenied):
+        await service.set_admin(222, 333, Role.INTERNAL)
 
 
 async def test_membership_disable_reenable_and_start(identity_service):
@@ -48,7 +71,7 @@ async def test_membership_disable_reenable_and_start(identity_service):
         (Role.FULL, "external", True),
     ],
 )
-@pytest.mark.parametrize("permission", ["read_feedback", "manage_reports", "view_statistics"])
+@pytest.mark.parametrize("permission", ["read_feedback", "view_statistics"])
 async def test_scope_matrix(identity_service, role, scope, allowed, permission):
     await identity_service.add_user(111, 222, "مدیر آزمایش")
     await identity_service.set_admin(111, 222, role)

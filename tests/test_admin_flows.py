@@ -96,28 +96,68 @@ async def test_complete_add_disable_enable_user_flow(identity_service):
     )
 
 
-async def test_admin_role_confirmation_and_external_panel(identity_service):
-    await identity_service.add_user(111, 222, "مدیر خارجی")
+async def test_admin_role_confirmation_and_internal_panel(identity_service):
+    await identity_service.add_user(111, 222, "مدیر داخلی")
     chat = ChatHarness(identity_service)
     await chat.text("/admin")
     await chat.click("مدیران")
     await chat.click("افزودن")
-    await chat.pick(222, "مدیر خارجی")
-    await chat.click("مدیر خارجی")
+    await chat.pick(222, "مدیر داخلی")
+    assert chat.button("مدیر اصلی")
+    assert all(
+        "خارجی" not in button.text
+        for request in chat.latest
+        if isinstance(getattr(request, "reply_markup", None), InlineKeyboardMarkup)
+        for row in request.reply_markup.inline_keyboard
+        for button in row
+    )
+    await chat.click("مدیر داخلی")
     assert (await identity_service.authenticate(222)).admin_id is None
     await chat.click("تأیید")
     await chat.text("/admin", user=222)
     panel = chat.latest[-1]
-    assert "خارجی" in panel.text
-    assert "داخلی" not in panel.text
-    assert len(panel.reply_markup.inline_keyboard) == 1
+    assert "داخلی" in panel.text
+    assert chat.button("کاربران")
     await chat.text("/admin")
     await chat.click("مدیران")
-    await chat.click("مدیر خارجی")
+    await chat.click("مدیر داخلی")
     await chat.click("لغو مدیریت")
     await chat.click("تأیید")
     await chat.text("/admin", user=222)
     assert chat.latest[-1].text == ACCESS_DENIED
+
+
+async def test_group_management_flow_and_scoped_internal_user_list(identity_service):
+    manager_id = await identity_service.add_user(111, 222, "سرپرست محصول")
+    await identity_service.set_admin(111, 222, Role.INTERNAL)
+    member_id = await identity_service.add_user(111, 333, "عضو محصول")
+    await identity_service.add_user(111, 444, "عضو خارج گروه")
+    chat = ChatHarness(identity_service)
+
+    await chat.text("/admin")
+    await chat.click("گروه‌های داخلی")
+    await chat.click("ساخت گروه")
+    await chat.text("تیم محصول")
+    await chat.click("سرپرست محصول")
+    await chat.click("تأیید")
+    assert "تیم محصول" in chat.latest[-1].text
+    await chat.click("افزودن عضو موجود")
+    await chat.click("عضو محصول")
+    await chat.click("تأیید")
+    assert "1" in chat.latest[-1].text
+
+    await chat.text("/admin", user=222)
+    await chat.click("کاربران", user=222)
+    assert chat.button("عضو محصول")
+    assert all(
+        "عضو خارج گروه" not in button.text
+        for request in chat.latest
+        if isinstance(getattr(request, "reply_markup", None), InlineKeyboardMarkup)
+        for row in request.reply_markup.inline_keyboard
+        for button in row
+    )
+    assert (await identity_service.get_user(222, member_id))["display_name"] == "عضو محصول"
+    assert manager_id
 
 
 async def test_stolen_callback_and_revoked_pending_confirmation(identity_service):

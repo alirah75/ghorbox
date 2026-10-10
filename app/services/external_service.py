@@ -220,64 +220,73 @@ class ExternalService(FeedbackService):
                 _, state = await self._read_token(conn, actor, token)
                 if state["action"] != "confirm":
                     raise InputError("دکمه تأیید معتبر نیست.")
-                data = state["payload"]
-                target = await self._person(conn, data["recipient"])
-                body = validate_body(data["body"])
-                if data["kind"] not in KINDS:
-                    raise InputError("نوع بازخورد نامعتبر است.")
-                cid, mid, access = uuid4().hex, uuid4().hex, uuid4().hex
-                now = int(self.clock())
-                await conn.execute(
-                    self.tables["conversations"]
-                    .insert()
-                    .values(
-                        id=cid,
-                        kind=data["kind"],
-                        expires_at=now + 90 * 86400,
-                        subject_cipher=self.seal(
-                            {
-                                "id": target["id"],
-                                "name": target["display_name"],
-                                "department": target["department"],
-                            },
-                            cid,
-                            "subject",
-                            Purpose.CONTENT,
-                        ),
-                        route_cipher=self.seal(
-                            {"sender": actor.user_id, "external_person": target["id"]}, cid, "route"
-                        ),
-                    )
-                )
-                await conn.execute(
-                    self.tables["participant_access"]
-                    .insert()
-                    .values(
-                        id=access,
-                        conversation_id=cid,
-                        access_tag=self.cipher.tag("participant", cid, actor.user_id),
-                        permissions_cipher=self.seal({"role": "sender"}, access, "permissions"),
-                    )
-                )
-                await conn.execute(
-                    self.tables["messages"]
-                    .insert()
-                    .values(
-                        id=mid,
-                        conversation_id=cid,
-                        sequence=1,
-                        message_type="initial",
-                        accepted_day=datetime.fromtimestamp(now, self.zone).date().isoformat(),
-                        body_cipher=self.seal(body, mid, "body", Purpose.CONTENT),
-                        direction_cipher=self.seal("sender", mid, "direction"),
-                    )
-                )
-                await self._record_contributor(conn, actor.user_id, now)
-                sessions = self.tables["interaction_sessions"]
-                await conn.execute(
-                    delete(sessions).where(sessions.c.owner_tag == self.owner(actor.user_id))
-                )
-                return mid
+                return await self._store_external_feedback(conn, actor, state["payload"])
+
+    async def submit_body(self, actor_id, body):
+        async with self.identity.database.transaction(write=True) as ic:
+            actor = await IdentityRepository(ic).authenticate(actor_id)
+            async with self.database.transaction(write=True) as conn:
+                data = await self._compose_payload(conn, actor, body)
+                return await self._store_external_feedback(conn, actor, data)
+
+    async def _store_external_feedback(self, conn, actor, data):
+        target = await self._person(conn, data["recipient"])
+        body = validate_body(data["body"])
+        if data["kind"] not in KINDS:
+            raise InputError("نوع بازخورد نامعتبر است.")
+        cid, mid, access = uuid4().hex, uuid4().hex, uuid4().hex
+        now = int(self.clock())
+        await conn.execute(
+            self.tables["conversations"]
+            .insert()
+            .values(
+                id=cid,
+                kind=data["kind"],
+                expires_at=now + 90 * 86400,
+                subject_cipher=self.seal(
+                    {
+                        "id": target["id"],
+                        "name": target["display_name"],
+                        "department": target["department"],
+                    },
+                    cid,
+                    "subject",
+                    Purpose.CONTENT,
+                ),
+                route_cipher=self.seal(
+                    {"sender": actor.user_id, "external_person": target["id"]}, cid, "route"
+                ),
+            )
+        )
+        await conn.execute(
+            self.tables["participant_access"]
+            .insert()
+            .values(
+                id=access,
+                conversation_id=cid,
+                access_tag=self.cipher.tag("participant", cid, actor.user_id),
+                permissions_cipher=self.seal({"role": "sender"}, access, "permissions"),
+            )
+        )
+        await conn.execute(
+            self.tables["messages"]
+            .insert()
+            .values(
+                id=mid,
+                conversation_id=cid,
+                sequence=1,
+                message_type="initial",
+                accepted_day=datetime.fromtimestamp(now, self.zone).date().isoformat(),
+                body_cipher=self.seal(body, mid, "body", Purpose.CONTENT),
+                direction_cipher=self.seal("sender", mid, "direction"),
+            )
+        )
+        await self._record_contributor(conn, actor.user_id, now)
+        sessions = self.tables["interaction_sessions"]
+        await conn.execute(
+            delete(sessions).where(sessions.c.owner_tag == self.owner(actor.user_id))
+        )
+        return mid
 
     async def inbox(self, actor_id, page=0):
         await self.identity.require(actor_id, "external", "read_feedback")

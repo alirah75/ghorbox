@@ -47,7 +47,6 @@ def render_report(payload, page=None):
         "suggestion": "پیشنهاد",
         "contributors": "مشارکت‌کنندگان اولیه",
         "replies": "پاسخ‌ها",
-        "reports": "گزارش‌های تخلف",
         "active_members": "اعضای فعال هنگام تهیه",
     }
     text += "\nاعداد به‌صورت بازه‌اند؛ «پنهان» به معنی صفر نیست."
@@ -136,11 +135,7 @@ class StatisticsService:
             .select_from(m)
             .where(m.c.message_type == "reply", m.c.accepted_day >= first, m.c.accepted_day < last)
         )
-        r = self.t["reports"]
-        reports = await conn.scalar(
-            select(func.count()).select_from(r).where(r.c.created_at >= start, r.c.created_at < end)
-        )
-        counts.update(replies=bucket(replies), reports=bucket(reports))
+        counts.update(replies=bucket(replies))
         if s.scope == Scope.INTERNAL:
             users = s.identity.tables["users"]
             counts["active_members"] = bucket(

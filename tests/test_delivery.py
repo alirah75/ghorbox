@@ -22,6 +22,8 @@ async def test_fresh_message_has_no_sender_metadata(feedback_service):
     assert params["parse_mode"] is None
     assert params["link_preview_options"].is_disabled
     assert "reply_parameters" not in params
+    assert "پیام ناشناس جدید" in params["text"]
+    assert params["reply_markup"].inline_keyboard[0][0].text == "💬 ورود به گفتگوی ناشناس"
     assert (await feedback_service.delivery_status(333, receipt))[0] == "sent"
 
 

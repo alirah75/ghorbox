@@ -174,7 +174,7 @@ class DeliveryWorker:
                 except AccessDenied:
                     return None
         heading = (
-            "📩 بازخورد ناشناس"
+            "📩 پیام ناشناس جدید"
             if row["sequence"] == 1
             else (
                 "↩️ پاسخ مدیریت بخش خارجی (واسطه)"
@@ -182,15 +182,30 @@ class DeliveryWorker:
                 else "↩️ پاسخ در گفتگوی ناشناس"
             )
         )
-        text = f"{heading}\n\nنوع: {KINDS[row['kind']]}\n\n{body}\n\nتاریخچه گفتگو در /start"
+        text = f"{heading}\n\nنوع: {KINDS[row['kind']]}\n\n{body}"
+        action = "chat_open" if service.scope == Scope.INTERNAL else "thread"
+        payload = (
+            {"cid": row["conversation_id"]}
+            if service.scope == Scope.INTERNAL
+            else {"cid": row["conversation_id"], "page": row["sequence"] - 1}
+        )
         token = await service.issue(
             target["telegram_id"],
-            "thread",
-            {"cid": row["conversation_id"], "page": row["sequence"] - 1},
+            action,
+            payload,
         )
         markup = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="↩️ مشاهده گفتگو و پاسخ", callback_data=token)]
+                [
+                    InlineKeyboardButton(
+                        text=(
+                            "💬 ورود به گفتگوی ناشناس"
+                            if service.scope == Scope.INTERNAL
+                            else "↩️ مشاهده گفتگو و پاسخ"
+                        ),
+                        callback_data=token,
+                    )
+                ]
             ]
         )
         return target["telegram_id"], text, recipient_id, markup

@@ -69,18 +69,24 @@ def create_bootstrap_router(service: IdentityService, feedback=None, external=No
                     )
                 ],
             )
-        for domain, label in [
-            (feedback, "📚 گفتگوهای داخلی من"),
-            (external, "📚 گفتگوهای خارجی من"),
-        ]:
-            if domain is not None:
-                markup.inline_keyboard.append(
-                    [
-                        InlineKeyboardButton(
-                            text=label, callback_data=await domain.issue(actor_id, "history_menu")
-                        )
-                    ]
-                )
+        if feedback is not None:
+            markup.inline_keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        text="💬 گفتگوهای ناشناس",
+                        callback_data=await feedback.issue(actor_id, "chat_list", 0),
+                    )
+                ]
+            )
+        if external is not None:
+            markup.inline_keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        text="📚 گفتگوهای خارجی من",
+                        callback_data=await external.issue(actor_id, "history_menu"),
+                    )
+                ]
+            )
         await message.answer(READY, reply_markup=markup)
 
     async def notice(message, actor_id, text):
@@ -107,6 +113,126 @@ def create_bootstrap_router(service: IdentityService, feedback=None, external=No
         ]
         await message.answer(
             "👥 کاربران" if users else "کاربری یافت نشد.", reply_markup=keyboard(actor_id, rows)
+        )
+
+    async def groups_page(message, actor_id):
+        actor = await service.authenticate(actor_id)
+        groups = await service.list_internal_groups(actor_id)
+        rows = [
+            [
+                (
+                    f"{item['name']} — {item['member_count']} عضو",
+                    "group",
+                    [item["id"], 0],
+                )
+            ]
+            for item in groups
+        ]
+        if actor.allows(*MANAGE_ADMINS):
+            rows.append([("➕ ساخت گروه داخلی", "add_group", None)])
+        rows.append([("بازگشت به مدیریت", "panel", None)])
+        await message.answer(
+            "🏢 گروه‌های داخلی" if groups else "هنوز گروه داخلی ثبت نشده است.",
+            reply_markup=keyboard(actor_id, rows),
+        )
+
+    async def group_page(message, actor_id, group_id, page=0):
+        groups = await service.list_internal_groups(actor_id)
+        group = next((item for item in groups if item["id"] == group_id), None)
+        if group is None:
+            raise AccessDenied()
+        members = await service.list_internal_group_members(actor_id, group_id)
+        rows = [
+            [
+                (
+                    ("🟢 " if item["is_active"] else "⏸ ") + item["display_name"],
+                    "group_member",
+                    [group_id, item["id"], item["display_name"]],
+                )
+            ]
+            for item in members[page * 10 : page * 10 + 10]
+        ]
+        pages = []
+        if page:
+            pages.append(("قبلی", "group", [group_id, page - 1]))
+        if len(members) > page * 10 + 10:
+            pages.append(("بعدی", "group", [group_id, page + 1]))
+        if pages:
+            rows.append(pages)
+        rows.append([("➕ افزودن عضو موجود", "group_candidates", [group_id, 0])])
+        actor = await service.authenticate(actor_id)
+        if actor.allows(*MANAGE_ADMINS):
+            rows.append([("👤 تغییر مدیر گروه", "group_managers", [group_id, None, 0])])
+        rows.append([("بازگشت به گروه‌ها", "groups", None)])
+        await message.answer(
+            f"🏢 {group['name']}\nمدیر: {group['manager_name']}\n"
+            f"تعداد اعضا: {group['member_count']}",
+            reply_markup=keyboard(actor_id, rows),
+        )
+
+    async def group_candidates_page(message, actor_id, group_id, page=0):
+        candidates = await service.list_internal_group_candidates(actor_id, group_id)
+        rows = [
+            [
+                (
+                    item["display_name"]
+                    + (
+                        f" — انتقال از {item['current_group_name']}"
+                        if item["current_group_name"]
+                        else ""
+                    ),
+                    "ask_group_assign",
+                    [group_id, item["id"], item["display_name"]],
+                )
+            ]
+            for item in candidates[page * 10 : page * 10 + 10]
+        ]
+        pages = []
+        if page:
+            pages.append(("قبلی", "group_candidates", [group_id, page - 1]))
+        if len(candidates) > page * 10 + 10:
+            pages.append(("بعدی", "group_candidates", [group_id, page + 1]))
+        if pages:
+            rows.append(pages)
+        rows.append([("بازگشت", "group", [group_id, 0])])
+        await message.answer(
+            "کاربر عادی را انتخاب کنید:" if candidates else "کاربر قابل افزودنی وجود ندارد.",
+            reply_markup=keyboard(actor_id, rows),
+        )
+
+    async def group_managers_page(message, actor_id, group_id, group_name, page=0):
+        managers = await service.list_available_internal_managers(
+            actor_id, current_group_id=group_id
+        )
+        rows = [
+            [
+                (
+                    item["display_name"],
+                    "ask_group_manager",
+                    [group_id, group_name, item["id"], item["display_name"]],
+                )
+            ]
+            for item in managers[page * 10 : page * 10 + 10]
+        ]
+        pages = []
+        if page:
+            pages.append(("قبلی", "group_managers", [group_id, group_name, page - 1]))
+        if len(managers) > page * 10 + 10:
+            pages.append(("بعدی", "group_managers", [group_id, group_name, page + 1]))
+        if pages:
+            rows.append(pages)
+        rows.append(
+            [
+                (
+                    "لغو",
+                    "groups" if group_id is None else "group",
+                    None if group_id is None else [group_id, 0],
+                )
+            ]
+        )
+        await message.answer(
+            "مدیر داخلی گروه را انتخاب کنید:" if managers else "مدیر داخلیِ بدون گروه وجود ندارد.",
+            reply_markup=keyboard(actor_id, rows),
         )
 
     async def confirm(message, actor_id, description, action, payload):
@@ -150,6 +276,7 @@ def create_bootstrap_router(service: IdentityService, feedback=None, external=No
             rows = []
             if actor.allows(*MANAGE_USERS):
                 rows.append([("👥 کاربران", "users", [0, ""])])
+                rows.append([("🏢 گروه‌های داخلی", "groups", None)])
             if actor.allows(*MANAGE_ADMINS):
                 rows.append([("👮 مدیران", "admins", 0)])
             if not actor.admin_id:
@@ -162,15 +289,19 @@ def create_bootstrap_router(service: IdentityService, feedback=None, external=No
             rows.append([("🏠 خانه", "home", None)])
             markup = keyboard(actor_id, rows)
             for domain, label in [(feedback, "داخلی"), (external, "خارجی")]:
-                if domain is not None and (
-                    actor.allows(domain.scope.value, "manage_reports")
-                    or actor.allows(domain.scope.value, "read_feedback")
-                ):
+                if domain is not None and actor.allows(domain.scope.value, "read_feedback"):
+                    inbox_label = "📥 بازخوردهای اولیه " + label
+                    if domain is feedback:
+                        inbox_label = (
+                            "📥 همه بازخوردهای اولیه داخلی"
+                            if actor.allows(*MANAGE_ADMINS)
+                            else "📥 بازخوردهای گروه من"
+                        )
                     markup.inline_keyboard.insert(
                         0,
                         [
                             InlineKeyboardButton(
-                                text="🚩 نظارت و گزارش‌های " + label,
+                                text=inbox_label,
                                 callback_data=await domain.issue(actor_id, "mod_menu"),
                             )
                         ],
@@ -204,6 +335,60 @@ def create_bootstrap_router(service: IdentityService, feedback=None, external=No
             )
         elif action == "users":
             await users_page(message, actor_id, *payload)
+        elif action == "groups":
+            await groups_page(message, actor_id)
+        elif action == "group":
+            await group_page(message, actor_id, *payload)
+        elif action == "add_group":
+            actor.require(*MANAGE_ADMINS)
+            nav.set_form(actor_id, "group_name")
+            await notice(message, actor_id, "نام گروه داخلی را بنویسید. برای لغو /cancel")
+        elif action == "group_managers":
+            await group_managers_page(message, actor_id, *payload)
+        elif action == "ask_group_manager":
+            group_id, group_name, manager_user_id, manager_name = payload
+            description = (
+                f"ساخت گروه «{group_name}» با مدیریت {manager_name}"
+                if group_id is None
+                else f"تغییر مدیر گروه به {manager_name}"
+            )
+            await confirm(
+                message,
+                actor_id,
+                description,
+                "save_group_create" if group_id is None else "save_group_manager",
+                [group_id, group_name, manager_user_id],
+            )
+        elif action == "save_group_create":
+            group_id = await service.create_internal_group(actor_id, payload[1], payload[2])
+            await group_page(message, actor_id, group_id)
+        elif action == "save_group_manager":
+            await service.set_internal_group_manager(actor_id, payload[0], payload[2])
+            await group_page(message, actor_id, payload[0])
+        elif action == "group_candidates":
+            await group_candidates_page(message, actor_id, *payload)
+        elif action == "ask_group_assign":
+            await confirm(
+                message,
+                actor_id,
+                f"افزودن یا انتقال {payload[2]} به این گروه",
+                "save_group_assign",
+                payload,
+            )
+        elif action == "save_group_assign":
+            await service.assign_internal_group_member(actor_id, payload[0], payload[1])
+            await group_page(message, actor_id, payload[0])
+        elif action == "group_member":
+            await confirm(
+                message,
+                actor_id,
+                f"حذف {payload[2]} از این گروه؛ حساب کاربر حذف نمی‌شود.",
+                "save_group_remove",
+                payload,
+            )
+        elif action == "save_group_remove":
+            await service.remove_internal_group_member(actor_id, payload[0], payload[1])
+            await group_page(message, actor_id, payload[0])
         elif action == "user":
             user = await service.get_user(actor_id, payload)
             active = bool(user["is_active"])
@@ -332,12 +517,13 @@ def create_bootstrap_router(service: IdentityService, feedback=None, external=No
             await notice(message, actor_id, "دسترسی مدیریتی لغو شد.")
         elif action == "role":
             actor.require(*MANAGE_ADMINS)
-            role_name = {"internal": "داخلی", "external": "خارجی", "full": "کامل"}[payload[1]]
+            role_name = {"internal": "مدیر داخلی", "full": "مدیر اصلی"}[payload[1]]
             await confirm(
                 message,
                 actor_id,
                 f"تنظیم مدیریت: {payload[3]}\nنقش: {role_name}\n"
-                f"مدیریت مدیران: {'بله' if payload[2] else 'خیر'}\nمجوزهای قبلی جایگزین می‌شوند.",
+                f"مدیریت مدیران: {'بله' if payload[1] == 'full' else 'خیر'}\n"
+                "مجوزهای قبلی جایگزین می‌شوند.",
                 "save_admin",
                 payload,
             )
@@ -356,7 +542,7 @@ def create_bootstrap_router(service: IdentityService, feedback=None, external=No
             await message.answer("برای ارسال بازخورد ابتدا از منوی /start همکار را انتخاب کنید.")
             return
         action, payload = form
-        actor.require(*(MANAGE_ADMINS if action == "pick_admin" else MANAGE_USERS))
+        actor.require(*(MANAGE_ADMINS if action in {"pick_admin", "group_name"} else MANAGE_USERS))
         if action in {"pick_user", "pick_admin"}:
             shared = message.users_shared
             if (
@@ -376,9 +562,7 @@ def create_bootstrap_router(service: IdentityService, feedback=None, external=No
                     [(label, "role", [telegram_id, role, manager, registered_name])]
                     for label, role, manager in [
                         ("مدیر داخلی", "internal", False),
-                        ("مدیر خارجی", "external", False),
-                        ("مدیر کامل", "full", False),
-                        ("مدیر کامل + مدیریت مدیران", "full", True),
+                        ("مدیر اصلی", "full", True),
                     ]
                 ]
                 rows.append([("❌ لغو", "home", None)])
@@ -397,7 +581,11 @@ def create_bootstrap_router(service: IdentityService, feedback=None, external=No
         if message.text is None:
             raise InputError("فقط متن بفرستید؛ برای لغو /cancel")
         value = message.text.strip()
-        if action in {"user_name", "rename"}:
+        if action == "group_name":
+            name = valid_name(value)
+            nav.forms.pop(actor_id, None)
+            await group_managers_page(message, actor_id, None, name)
+        elif action in {"user_name", "rename"}:
             name = valid_name(value)
             nav.forms.pop(actor_id, None)
             description = f"نام: {name}" + (

@@ -5,7 +5,6 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from app.core.logging import Event, log_event
 from app.core.permissions import AccessDenied, InputError
-from app.services.feedback_service import KINDS
 
 
 async def feedback_home_button(service, actor_id):
@@ -66,19 +65,11 @@ async def handle_feedback_text(message, service):
         await service.cancel(actor_id)
         await colleagues_page(message, service, actor_id, search=search)
         return True
-    data, token = await service.preview(actor_id, message.text)
-    cancel = await service.issue(actor_id, "cancel")
+    receipt = await service.submit_body(actor_id, message.text)
     await message.answer(
-        f"گیرنده: {data['recipient_name']}\nنوع: {KINDS[data['kind']]}\n\n{data['body']}\n\n"
-        "پیش از ارسال، نام و جزئیات شناسایی‌کننده خودتان را بررسی کنید. آیا ارسال شود؟",
-        parse_mode=None,
+        "✅ بازخورد ثبت شد و در صف تحویل قرار گرفت.",
         reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ ارسال", callback_data=token),
-                    InlineKeyboardButton(text="❌ لغو", callback_data=cancel),
-                ]
-            ]
+            inline_keyboard=[[InlineKeyboardButton(text="📬 وضعیت تحویل", callback_data=receipt)]]
         ),
     )
     return True
@@ -182,8 +173,6 @@ def create_feedback_router(service, cancel_admin, external=None):
             )
         except Exception:
             log_event(Event.UPDATE_FAILED)
-            await message.answer(
-                "خطایی رخ داد؛ اگر تأیید ارسال را زده‌اید دوباره همان دکمه را امتحان کنید."
-            )
+            await message.answer("خطایی رخ داد؛ وضعیت را از تاریخچه یا /start بررسی کنید.")
 
     return router

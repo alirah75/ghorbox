@@ -28,11 +28,12 @@ async def test_three_independent_schemas_and_repeated_upgrade(storage_settings):
             async with db.transaction() as conn:
                 tables = await conn.run_sync(lambda c: inspect(c).get_table_names())
                 assert ("users" in tables) == (kind == "identity")
+                assert ("internal_groups" in tables) == (kind == "identity")
                 assert ("external_people" in tables) == (kind == "external")
                 assert ("messages" in tables) == (kind != "identity")
                 assert (
                     await conn.execute(text("SELECT version_num FROM alembic_version"))
-                ).scalar() == "0001"
+                ).scalar() == "0002"
                 assert (await conn.exec_driver_sql("PRAGMA foreign_keys")).scalar() == 1
                 assert (await conn.exec_driver_sql("PRAGMA journal_mode")).scalar() == "wal"
                 assert (await conn.exec_driver_sql("PRAGMA synchronous")).scalar() == 2

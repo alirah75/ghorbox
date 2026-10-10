@@ -27,18 +27,23 @@ def stamp(value):
 async def seed(s, authors=5, kinds=("suggestion",), extra_small=False):
     s.clock = lambda: stamp("2026-09-22T12:00:00")
     target = (await s.identity.authenticate(222)).user_id
+    group_id = None
     if s.scope.value == "external":
         target = await s.save_person(111, "فرد خارجی آماری")
+    else:
+        group_id = (await s.identity.list_internal_groups(111))[0]["id"]
     for index in range(authors):
         actor = 4000 + index
-        await s.identity.add_user(111, actor, f"عضو آماری {index}")
+        actor_user_id = await s.identity.add_user(111, actor, f"عضو آماری {index}")
+        if group_id is not None:
+            await s.identity.assign_internal_group_member(111, group_id, actor_user_id)
         await s.identity.authenticate(actor, started=True)
         for kind in kinds:
             await s.begin(actor, target, kind)
             _, token = await s.preview(actor, BODY)
             await s.submit(actor, token)
     if extra_small:
-        second = (await s.identity.authenticate(111)).user_id
+        second = (await s.identity.authenticate(333)).user_id
         if s.scope.value == "external":
             second = await s.save_person(111, "فرد کم‌تعداد")
         await s.begin(4000, second, "criticism")

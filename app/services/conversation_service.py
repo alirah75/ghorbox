@@ -56,7 +56,7 @@ class ConversationService:
         if writable and (
             conversation["status"] != "open" or conversation["expires_at"] <= int(s.clock())
         ):
-            raise InputError("این گفتگو بسته یا منقضی شده و پاسخ‌گویی ممکن نیست.")
+            raise InputError("این گفتگو غیرفعال یا منقضی شده و پاسخ‌گویی ممکن نیست.")
         return conversation, role
 
     async def _owned(self, conn, actor):
@@ -93,6 +93,27 @@ class ConversationService:
                         "subject": subject["name"] if role == "sender" else "فرستنده ناشناس",
                     }
                 )
+                if len(result) >= page * 10 + 11:
+                    break
+        return result[page * 10 : page * 10 + 11]
+
+    async def active_chats(self, actor_id, page=0):
+        if self.feedback.scope != Scope.INTERNAL or type(page) is not int or not 0 <= page <= 10000:
+            raise InputError("صفحه نامعتبر است.")
+        s = self.feedback
+        actor = await s.identity.authenticate(actor_id)
+        result = []
+        async with s.database.transaction() as conn:
+            async for row, role in self._owned(conn, actor):
+                if row["status"] != "open" or row["expires_at"] <= int(s.clock()):
+                    continue
+                subject = s.unseal(row["subject_cipher"], row["id"], "subject", Purpose.CONTENT)
+                label = (
+                    subject["name"]
+                    if role == "sender"
+                    else f"گفتگوی ناشناس #{row['id'][:6].upper()}"
+                )
+                result.append({"id": row["id"], "kind": row["kind"], "label": label})
                 if len(result) >= page * 10 + 11:
                     break
         return result[page * 10 : page * 10 + 11]
@@ -170,7 +191,6 @@ class ConversationService:
             return {
                 "id": cid,
                 "message_id": message["id"],
-                "can_report": direction != role,
                 "kind": row["kind"],
                 "subject": subject["name"],
                 "department": subject.get("department"),
@@ -231,77 +251,122 @@ class ConversationService:
                 _, state = await s._read_token(conn, actor, token)
                 if state["action"] != "reply_confirm":
                     raise InputError("تأیید پاسخ معتبر نیست.")
-                data = state["payload"]
-                cid = data["cid"]
-                conversation, role = await self._access(
-                    conn, actor, cid, data["manager"], writable=True
-                )
-                route = s.unseal(conversation["route_cipher"], cid, "route")
-                destination = None
-                if s.scope == Scope.INTERNAL:
-                    destination = route["recipient"] if role == "sender" else route["sender"]
-                    await s._target(ic, actor, destination)
-                else:
-                    await s._person(conn, route["external_person"])
-                    if role == "manager":
-                        users = s.identity.tables["users"]
-                        ready = await ic.scalar(
-                            select(users.c.id).where(
-                                users.c.id == route["sender"],
-                                users.c.is_active == 1,
-                                users.c.started_at.is_not(None),
-                                users.c.delivery_state != "blocked",
+                return await self._store_reply(ic, conn, actor, state["payload"])
+
+    async def activate_chat(self, actor_id, cid):
+        s = self.feedback
+        if s.scope != Scope.INTERNAL:
+            raise AccessDenied()
+        actor = await s.identity.authenticate(actor_id)
+        async with s.database.transaction(write=True) as conn:
+            await self._access(conn, actor, cid, writable=True)
+            await s._clean(conn)
+            await s._session(
+                conn, actor.user_id, "chat_active", {"cid": cid, "manager": False}, draft=True
+            )
+
+    async def send_active(self, actor_id, body):
+        s = self.feedback
+        if s.scope != Scope.INTERNAL:
+            raise AccessDenied()
+        async with s.identity.database.transaction(write=True) as ic:
+            actor = await IdentityRepository(ic).authenticate(actor_id)
+            async with s.database.transaction(write=True) as conn:
+                sessions = self.tables["interaction_sessions"]
+                row = (
+                    (
+                        await conn.execute(
+                            select(sessions).where(
+                                sessions.c.token_hash == s.cipher.tag("draft", actor.user_id),
+                                sessions.c.owner_tag == s.owner(actor.user_id),
+                                sessions.c.expires_at > int(s.clock()),
                             )
                         )
-                        if not ready:
-                            raise InputError("طرف گفتگو فعلاً آماده دریافت پاسخ نیست.")
-                        destination = route["sender"]
-                body = validate_body(data["body"])
-                m = self.tables["messages"]
-                sequence = 1 + await conn.scalar(
-                    select(func.max(m.c.sequence)).where(m.c.conversation_id == cid)
+                    )
+                    .mappings()
+                    .one_or_none()
                 )
-                mid, now = uuid4().hex, int(s.clock())
-                direction = (
-                    {"role": "manager", "user": actor.user_id} if role == "manager" else role
-                )
-                await conn.execute(
-                    m.insert().values(
-                        id=mid,
-                        conversation_id=cid,
-                        sequence=sequence,
-                        body_cipher=s.seal(body, mid, "body", Purpose.CONTENT),
-                        direction_cipher=s.seal(direction, mid, "direction"),
-                        message_type="reply",
-                        accepted_day=datetime.fromtimestamp(now, s.zone).date().isoformat(),
+                if row is None:
+                    raise InputError("گفتگوی فعال منقضی شده است؛ دوباره از اعلان وارد شوید.")
+                state = s.unseal(row["state_cipher"], row["id"], "session")
+                if state["action"] != "chat_active":
+                    raise InputError("ابتدا از اعلان وارد گفتگوی ناشناس شوید.")
+                data = {**state["payload"], "body": body}
+                return await self._store_reply(ic, conn, actor, data, keep_active=True)
+
+    async def _store_reply(self, ic, conn, actor, data, *, keep_active=False):
+        s = self.feedback
+        cid = data["cid"]
+        conversation, role = await self._access(conn, actor, cid, data["manager"], writable=True)
+        route = s.unseal(conversation["route_cipher"], cid, "route")
+        destination = None
+        if s.scope == Scope.INTERNAL:
+            destination = route["recipient"] if role == "sender" else route["sender"]
+            await s._target(ic, actor, destination)
+        else:
+            await s._person(conn, route["external_person"])
+            if role == "manager":
+                users = s.identity.tables["users"]
+                ready = await ic.scalar(
+                    select(users.c.id).where(
+                        users.c.id == route["sender"],
+                        users.c.is_active == 1,
+                        users.c.started_at.is_not(None),
+                        users.c.delivery_state != "blocked",
                     )
                 )
-                if destination is not None:
-                    job = uuid4().hex
-                    await conn.execute(
-                        self.tables["outbox"]
-                        .insert()
-                        .values(
-                            id=job,
-                            message_id=mid,
-                            destination_cipher=s.seal(destination, job, "destination"),
-                            dedupe_key=mid,
-                            next_attempt_at=now,
-                        )
-                    )
-                c = self.tables["conversations"]
-                await conn.execute(
-                    update(c)
-                    .where(c.c.id == cid)
-                    .values(updated_at=now, expires_at=now + 90 * 86400, version=c.c.version + 1)
+                if not ready:
+                    raise InputError("طرف گفتگو فعلاً آماده دریافت پاسخ نیست.")
+                destination = route["sender"]
+        body = validate_body(data["body"])
+        m = self.tables["messages"]
+        sequence = 1 + await conn.scalar(
+            select(func.max(m.c.sequence)).where(m.c.conversation_id == cid)
+        )
+        mid, now = uuid4().hex, int(s.clock())
+        direction = {"role": "manager", "user": actor.user_id} if role == "manager" else role
+        await conn.execute(
+            m.insert().values(
+                id=mid,
+                conversation_id=cid,
+                sequence=sequence,
+                body_cipher=s.seal(body, mid, "body", Purpose.CONTENT),
+                direction_cipher=s.seal(direction, mid, "direction"),
+                message_type="reply",
+                accepted_day=datetime.fromtimestamp(now, s.zone).date().isoformat(),
+            )
+        )
+        if destination is not None:
+            job = uuid4().hex
+            await conn.execute(
+                self.tables["outbox"]
+                .insert()
+                .values(
+                    id=job,
+                    message_id=mid,
+                    destination_cipher=s.seal(destination, job, "destination"),
+                    dedupe_key=mid,
+                    next_attempt_at=now,
                 )
-                sessions = self.tables["interaction_sessions"]
-                await conn.execute(
-                    delete(sessions).where(sessions.c.owner_tag == s.owner(actor.user_id))
-                )
-                return {
-                    "cid": cid,
-                    "page": sequence - 1,
-                    "manager": data["manager"],
-                    "queued": destination is not None,
-                }
+            )
+        c = self.tables["conversations"]
+        await conn.execute(
+            update(c)
+            .where(c.c.id == cid)
+            .values(updated_at=now, expires_at=now + 90 * 86400, version=c.c.version + 1)
+        )
+        sessions = self.tables["interaction_sessions"]
+        if keep_active:
+            await s._session(
+                conn, actor.user_id, "chat_active", {"cid": cid, "manager": False}, draft=True
+            )
+        else:
+            await conn.execute(
+                delete(sessions).where(sessions.c.owner_tag == s.owner(actor.user_id))
+            )
+        return {
+            "cid": cid,
+            "page": sequence - 1,
+            "manager": data["manager"],
+            "queued": destination is not None,
+        }

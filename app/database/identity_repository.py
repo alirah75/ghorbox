@@ -2,8 +2,8 @@
 
 from sqlalchemy import or_, select
 
-from app.core.permissions import AccessDenied, Principal
-from app.database.schema_v1 import schema
+from app.core.permissions import MANAGE_ADMINS, AccessDenied, Principal
+from app.database.schema import schema
 
 
 class IdentityRepository:
@@ -45,11 +45,16 @@ class IdentityRepository:
     async def user_by_id(self, actor: Principal, user_id: str):
         actor.require("internal", "manage_users")
         users = self.tables["users"]
-        result = (
-            (await self.connection.execute(select(users).where(users.c.id == user_id)))
-            .mappings()
-            .one_or_none()
-        )
+        query = select(users).where(users.c.id == user_id)
+        if not actor.allows(*MANAGE_ADMINS):
+            groups = self.tables["internal_groups"]
+            memberships = self.tables["internal_group_memberships"]
+            query = (
+                query.join(memberships, memberships.c.user_id == users.c.id)
+                .join(groups, groups.c.id == memberships.c.group_id)
+                .where(groups.c.manager_admin_id == actor.admin_id, groups.c.is_active == 1)
+            )
+        result = (await self.connection.execute(query)).mappings().one_or_none()
         if result is None:
             raise AccessDenied()
         return dict(result)
@@ -58,6 +63,14 @@ class IdentityRepository:
         actor.require("internal", "manage_users")
         users = self.tables["users"]
         query = select(users)
+        if not actor.allows(*MANAGE_ADMINS):
+            groups = self.tables["internal_groups"]
+            memberships = self.tables["internal_group_memberships"]
+            query = (
+                query.join(memberships, memberships.c.user_id == users.c.id)
+                .join(groups, groups.c.id == memberships.c.group_id)
+                .where(groups.c.manager_admin_id == actor.admin_id, groups.c.is_active == 1)
+            )
         if search:
             matches = users.c.display_name.contains(search, autoescape=True)
             if search.isdecimal() and 0 < int(search) < 2**52:

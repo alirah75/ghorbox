@@ -60,7 +60,7 @@ class IdentityService:
                     )
                 )
                 await conn.execute(admins.insert().values(id=admin_id, user_id=user_id))
-                await self._replace_grants(conn, admin_id, role_grants(Role.FULL) | {MANAGE_ADMINS})
+                await self._replace_grants(conn, admin_id, role_grants(Role.MAIN))
                 await self._audit(conn, admin_id, "bootstrap", user_id)
             if not telegram_ids:
                 raise InputError("حداقل یک مدیر اولیه لازم است.")
@@ -103,6 +103,18 @@ class IdentityService:
         async with self.database.transaction(write=True) as conn:
             actor = await IdentityRepository(conn).authenticate(actor_id)
             actor.require("internal", "manage_users")
+            group_id = None
+            if not actor.allows(*MANAGE_ADMINS):
+                groups = self.tables["internal_groups"]
+                group_id = (
+                    await conn.execute(
+                        select(groups.c.id).where(
+                            groups.c.manager_admin_id == actor.admin_id, groups.c.is_active == 1
+                        )
+                    )
+                ).scalar_one_or_none()
+                if group_id is None:
+                    raise InputError("ابتدا مدیر اصلی باید گروه داخلی شما را ایجاد کند.")
             valid_id(telegram_id)
             name = valid_name(name)
             users = self.tables["users"]
@@ -114,6 +126,17 @@ class IdentityService:
             await conn.execute(
                 users.insert().values(id=user_id, telegram_id=telegram_id, display_name=name)
             )
+            if group_id is not None:
+                await conn.execute(
+                    self.tables["internal_group_memberships"]
+                    .insert()
+                    .values(
+                        id=uuid4().hex,
+                        group_id=group_id,
+                        user_id=user_id,
+                        assigned_by_admin_id=actor.admin_id,
+                    )
+                )
             await self._audit(conn, actor.admin_id, "add_user", user_id)
             return user_id
 
@@ -129,6 +152,8 @@ class IdentityService:
             if active is not None:
                 if type(active) is not bool:
                     raise InputError("وضعیت نامعتبر است.")
+                if not active:
+                    await self._require_group_manager_reassigned(conn, user_id)
                 values["is_active"] = int(active)
             if name is not None:
                 values["display_name"] = valid_name(name)
@@ -188,20 +213,20 @@ class IdentityService:
             return name
 
     async def set_admin(
-        self, actor_id: int, telegram_id: int, role: Role, *, can_manage_admins=False
+        self, actor_id: int, telegram_id: int, role: Role, *, can_manage_admins=None
     ):
         async with self.database.transaction(write=True) as conn:
             actor = await IdentityRepository(conn).authenticate(actor_id)
             actor.require(*MANAGE_ADMINS)
             valid_id(telegram_id)
-            if type(can_manage_admins) is not bool:
+            if can_manage_admins is not None and type(can_manage_admins) is not bool:
                 raise InputError("مجوز نامعتبر است.")
             try:
                 permissions = role_grants(Role(role))
             except ValueError:
                 raise InputError("نقش مدیریتی معتبر نیست.") from None
-            # A domain-only admin may never receive global administrator management.
-            if can_manage_admins and Role(role) != Role.FULL:
+            # Main administrators always manage administrators; scoped roles never do.
+            if can_manage_admins and Role(role) != Role.MAIN:
                 raise InputError("مدیریت مدیران فقط همراه نقش کامل قابل واگذاری است.")
             users, admins = (self.tables[key] for key in ("users", "admins"))
             user_id = (
@@ -217,14 +242,22 @@ class IdentityService:
                 await conn.execute(select(admins.c.id).where(admins.c.user_id == user_id))
             ).scalar_one_or_none()
             if admin_id:
+                if Role(role) != Role.INTERNAL:
+                    await self._require_group_manager_reassigned(conn, user_id)
                 await conn.execute(
                     update(admins).where(admins.c.id == admin_id).values(is_active=1)
                 )
             else:
                 admin_id = uuid4().hex
                 await conn.execute(admins.insert().values(id=admin_id, user_id=user_id))
-            if can_manage_admins:
-                permissions.add(MANAGE_ADMINS)
+            # Internal/main administrators are not ordinary group members. Promotion
+            # removes prior ordinary membership in the same atomic transaction.
+            if Role(role) in {Role.INTERNAL, Role.MAIN}:
+                await conn.execute(
+                    delete(self.tables["internal_group_memberships"]).where(
+                        self.tables["internal_group_memberships"].c.user_id == user_id
+                    )
+                )
             await self._replace_grants(conn, admin_id, permissions)
             await self._ensure_manager(conn)
             await self._audit(conn, actor.admin_id, "set_admin", user_id)
@@ -239,10 +272,300 @@ class IdentityService:
             ).scalar_one_or_none()
             if admin_id is None:
                 raise AccessDenied()
+            await self._require_group_manager_reassigned(conn, user_id)
             await conn.execute(update(admins).where(admins.c.id == admin_id).values(is_active=0))
             await self._replace_grants(conn, admin_id, set())
             await self._ensure_manager(conn)
             await self._audit(conn, actor.admin_id, "revoke_admin", user_id)
+
+    async def create_internal_group(self, actor_id: int, name: str, manager_user_id: str):
+        async with self.database.transaction(write=True) as conn:
+            actor = await IdentityRepository(conn).authenticate(actor_id)
+            actor.require(*MANAGE_ADMINS)
+            name = valid_name(name)
+            groups = self.tables["internal_groups"]
+            if (await conn.execute(select(groups.c.id).where(groups.c.name == name))).first():
+                raise InputError("گروهی با این نام قبلاً ثبت شده است.")
+            manager_admin_id = await self._internal_manager_admin_id(conn, manager_user_id)
+            if (
+                await conn.execute(
+                    select(groups.c.id).where(groups.c.manager_admin_id == manager_admin_id)
+                )
+            ).first():
+                raise InputError("این مدیر داخلی قبلاً مسئول یک گروه است.")
+            group_id = uuid4().hex
+            await conn.execute(
+                groups.insert().values(id=group_id, name=name, manager_admin_id=manager_admin_id)
+            )
+            await self._audit(conn, actor.admin_id, "create_internal_group", group_id)
+            return group_id
+
+    async def set_internal_group_manager(self, actor_id: int, group_id: str, manager_user_id: str):
+        async with self.database.transaction(write=True) as conn:
+            actor = await IdentityRepository(conn).authenticate(actor_id)
+            actor.require(*MANAGE_ADMINS)
+            groups = self.tables["internal_groups"]
+            if not (await conn.execute(select(groups.c.id).where(groups.c.id == group_id))).first():
+                raise AccessDenied()
+            manager_admin_id = await self._internal_manager_admin_id(conn, manager_user_id)
+            occupied = (
+                await conn.execute(
+                    select(groups.c.id).where(
+                        groups.c.manager_admin_id == manager_admin_id, groups.c.id != group_id
+                    )
+                )
+            ).scalar_one_or_none()
+            if occupied is not None:
+                raise InputError("این مدیر داخلی قبلاً مسئول یک گروه است.")
+            await conn.execute(
+                update(groups)
+                .where(groups.c.id == group_id)
+                .values(manager_admin_id=manager_admin_id)
+            )
+            await self._audit(conn, actor.admin_id, "set_internal_group_manager", group_id)
+
+    async def list_internal_groups(self, actor_id: int):
+        async with self.database.transaction() as conn:
+            actor = await IdentityRepository(conn).authenticate(actor_id)
+            if not actor.admin_id:
+                raise AccessDenied()
+            groups = self.tables["internal_groups"]
+            memberships = self.tables["internal_group_memberships"]
+            admins = self.tables["admins"]
+            users = self.tables["users"]
+            query = (
+                select(
+                    groups.c.id,
+                    groups.c.name,
+                    groups.c.is_active,
+                    users.c.id.label("manager_user_id"),
+                    users.c.display_name.label("manager_name"),
+                    func.count(memberships.c.id).label("member_count"),
+                )
+                .join(admins, admins.c.id == groups.c.manager_admin_id)
+                .join(users, users.c.id == admins.c.user_id)
+                .outerjoin(memberships, memberships.c.group_id == groups.c.id)
+                .group_by(groups.c.id, users.c.id)
+                .order_by(groups.c.name)
+            )
+            if not actor.allows(*MANAGE_ADMINS):
+                actor.require("internal", "manage_users")
+                query = query.where(groups.c.manager_admin_id == actor.admin_id)
+            return [dict(row) for row in (await conn.execute(query)).mappings()]
+
+    async def list_internal_group_members(self, actor_id: int, group_id: str):
+        async with self.database.transaction() as conn:
+            actor = await IdentityRepository(conn).authenticate(actor_id)
+            await self._group_for_actor(conn, actor, group_id)
+            memberships = self.tables["internal_group_memberships"]
+            users = self.tables["users"]
+            query = (
+                select(users.c.id, users.c.telegram_id, users.c.display_name, users.c.is_active)
+                .join(memberships, memberships.c.user_id == users.c.id)
+                .where(memberships.c.group_id == group_id)
+                .order_by(users.c.display_name, users.c.id)
+            )
+            return [dict(row) for row in (await conn.execute(query)).mappings()]
+
+    async def list_internal_group_candidates(self, actor_id: int, group_id: str):
+        async with self.database.transaction() as conn:
+            actor = await IdentityRepository(conn).authenticate(actor_id)
+            await self._group_for_actor(conn, actor, group_id)
+            users = self.tables["users"]
+            admins = self.tables["admins"]
+            memberships = self.tables["internal_group_memberships"]
+            groups = self.tables["internal_groups"]
+            query = (
+                select(
+                    users.c.id,
+                    users.c.display_name,
+                    memberships.c.group_id.label("current_group_id"),
+                    groups.c.name.label("current_group_name"),
+                )
+                .outerjoin(
+                    admins,
+                    (admins.c.user_id == users.c.id) & (admins.c.is_active == 1),
+                )
+                .outerjoin(memberships, memberships.c.user_id == users.c.id)
+                .outerjoin(groups, groups.c.id == memberships.c.group_id)
+                .where(users.c.is_active == 1, admins.c.id.is_(None))
+                .order_by(users.c.display_name, users.c.id)
+            )
+            if actor.allows(*MANAGE_ADMINS):
+                query = query.where(
+                    (memberships.c.group_id.is_(None)) | (memberships.c.group_id != group_id)
+                )
+            else:
+                query = query.where(memberships.c.group_id.is_(None))
+            return [dict(row) for row in (await conn.execute(query)).mappings()]
+
+    async def list_available_internal_managers(
+        self, actor_id: int, *, current_group_id: str | None = None
+    ):
+        async with self.database.transaction() as conn:
+            actor = await IdentityRepository(conn).authenticate(actor_id)
+            actor.require(*MANAGE_ADMINS)
+            users, admins, grants = (
+                self.tables[name] for name in ("users", "admins", "admin_grants")
+            )
+            groups = self.tables["internal_groups"]
+            query = (
+                select(users.c.id, users.c.display_name, groups.c.id.label("group_id"))
+                .join(admins, admins.c.user_id == users.c.id)
+                .join(
+                    grants,
+                    (grants.c.admin_id == admins.c.id)
+                    & (grants.c.scope == "internal")
+                    & (grants.c.permission == "manage_users"),
+                )
+                .outerjoin(groups, groups.c.manager_admin_id == admins.c.id)
+                .where(users.c.is_active == 1, admins.c.is_active == 1)
+            )
+            managers = [dict(row) for row in (await conn.execute(query)).mappings()]
+            result = []
+            for manager in managers:
+                permissions = (
+                    await conn.execute(
+                        select(grants.c.scope, grants.c.permission).where(
+                            grants.c.admin_id
+                            == select(admins.c.id)
+                            .where(admins.c.user_id == manager["id"])
+                            .scalar_subquery()
+                        )
+                    )
+                ).all()
+                if MANAGE_ADMINS in permissions:
+                    continue
+                if manager["group_id"] not in {None, current_group_id}:
+                    continue
+                result.append(manager)
+            return result
+
+    async def assign_internal_group_member(self, actor_id: int, group_id: str, user_id: str):
+        async with self.database.transaction(write=True) as conn:
+            actor = await IdentityRepository(conn).authenticate(actor_id)
+            await self._group_for_actor(conn, actor, group_id)
+            users = self.tables["users"]
+            admins = self.tables["admins"]
+            memberships = self.tables["internal_group_memberships"]
+            if not (
+                await conn.execute(
+                    select(users.c.id).where(users.c.id == user_id, users.c.is_active == 1)
+                )
+            ).first():
+                raise AccessDenied()
+            if (
+                await conn.execute(
+                    select(admins.c.id).where(admins.c.user_id == user_id, admins.c.is_active == 1)
+                )
+            ).first():
+                raise InputError("فقط کاربر عادی را می‌توان عضو گروه کرد.")
+            current = (
+                (
+                    await conn.execute(
+                        select(memberships.c.id, memberships.c.group_id).where(
+                            memberships.c.user_id == user_id
+                        )
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if current and current["group_id"] == group_id:
+                return False
+            if current and not actor.allows(*MANAGE_ADMINS):
+                raise AccessDenied()
+            if current:
+                await conn.execute(
+                    update(memberships)
+                    .where(memberships.c.id == current["id"])
+                    .values(group_id=group_id, assigned_by_admin_id=actor.admin_id)
+                )
+            else:
+                await conn.execute(
+                    memberships.insert().values(
+                        id=uuid4().hex,
+                        group_id=group_id,
+                        user_id=user_id,
+                        assigned_by_admin_id=actor.admin_id,
+                    )
+                )
+            await self._audit(conn, actor.admin_id, "assign_internal_group_member", group_id)
+            return True
+
+    async def remove_internal_group_member(self, actor_id: int, group_id: str, user_id: str):
+        async with self.database.transaction(write=True) as conn:
+            actor = await IdentityRepository(conn).authenticate(actor_id)
+            await self._group_for_actor(conn, actor, group_id)
+            memberships = self.tables["internal_group_memberships"]
+            result = await conn.execute(
+                delete(memberships).where(
+                    memberships.c.group_id == group_id, memberships.c.user_id == user_id
+                )
+            )
+            if not result.rowcount:
+                raise AccessDenied()
+            await self._audit(conn, actor.admin_id, "remove_internal_group_member", group_id)
+
+    async def _internal_manager_admin_id(self, conn, manager_user_id: str):
+        users, admins, grants = (self.tables[name] for name in ("users", "admins", "admin_grants"))
+        admin_id = (
+            await conn.execute(
+                select(admins.c.id)
+                .join(users, users.c.id == admins.c.user_id)
+                .join(grants, grants.c.admin_id == admins.c.id)
+                .where(
+                    users.c.id == manager_user_id,
+                    users.c.is_active == 1,
+                    admins.c.is_active == 1,
+                    grants.c.scope == "internal",
+                    grants.c.permission == "manage_users",
+                )
+            )
+        ).scalar_one_or_none()
+        if admin_id is None:
+            raise InputError("مدیر انتخاب‌شده باید مدیر داخلی فعال باشد.")
+        if (
+            await conn.execute(
+                select(grants.c.id).where(
+                    grants.c.admin_id == admin_id,
+                    grants.c.scope == MANAGE_ADMINS[0],
+                    grants.c.permission == MANAGE_ADMINS[1],
+                )
+            )
+        ).first():
+            raise InputError("مدیر اصلی نمی‌تواند مدیر مستقیم گروه داخلی باشد.")
+        return admin_id
+
+    async def _group_for_actor(self, conn, actor: Principal, group_id: str):
+        groups = self.tables["internal_groups"]
+        group = (
+            (
+                await conn.execute(
+                    select(groups).where(groups.c.id == group_id, groups.c.is_active == 1)
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if group is None or (
+            not actor.allows(*MANAGE_ADMINS) and group["manager_admin_id"] != actor.admin_id
+        ):
+            raise AccessDenied()
+        return group
+
+    async def _require_group_manager_reassigned(self, conn, user_id: str):
+        admins = self.tables["admins"]
+        groups = self.tables["internal_groups"]
+        owns_group = (
+            await conn.execute(
+                select(groups.c.id)
+                .join(admins, admins.c.id == groups.c.manager_admin_id)
+                .where(admins.c.user_id == user_id, groups.c.is_active == 1)
+            )
+        ).first()
+        if owns_group:
+            raise InputError("ابتدا مدیر دیگری برای گروه داخلی این شخص تعیین کنید.")
 
     async def _replace_grants(self, conn, admin_id, permissions):
         grants = self.tables["admin_grants"]

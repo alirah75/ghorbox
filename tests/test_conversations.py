@@ -2,7 +2,7 @@ import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from app.core.permissions import AccessDenied, InputError
 from app.services.conversation_service import ConversationService
@@ -72,6 +72,75 @@ async def test_bidirectional_reply_delivery_and_private_history(feedback_service
     assert (await cs.profile(222))["received_suggestion"] == 1
     assert (await cs.profile(222))["sent_replies"] == 1
     assert (await cs.profile(333))["received_replies"] == 1
+
+
+async def test_notification_opens_normal_anonymous_chat_without_reply_or_confirmation(
+    feedback_service,
+):
+    s = feedback_service
+    recipient = await s.identity.authenticate(222)
+    await s.begin(333, recipient.user_id, "suggestion")
+    await s.submit_body(333, "این پیام پس از انتخاب گیرنده مستقیماً ارسال می‌شود.")
+    bot = AsyncMock()
+    await DeliveryWorker(s, bot).run_once()
+    notification = bot.send_message.call_args.kwargs
+    token = notification["reply_markup"].inline_keyboard[0][0].callback_data
+    assert "این پیام" in notification["text"]
+
+    chat = ChatHarness(s.identity, s)
+    await chat.feed(callback_update(user_id=222, data=token))
+    assert "گفتگوی ناشناس فعال شد" in chat.latest[-1].text
+    await chat.text(REPLY, 222)
+    assert "پیام ناشناس ارسال شد" in chat.latest[-1].text
+    assert await count(s, "messages") == 2
+
+    bot.reset_mock()
+    await DeliveryWorker(s, bot).run_once()
+    assert bot.send_message.call_args.kwargs["chat_id"] == 333
+    assert REPLY in bot.send_message.call_args.kwargs["text"]
+
+
+async def test_multiple_open_chats_can_be_selected_without_closing_each_other(feedback_service):
+    s = feedback_service
+    cs = ConversationService(s)
+    recipient = await s.identity.authenticate(222)
+    await s.begin(333, recipient.user_id, "suggestion")
+    await s.submit_body(333, "پیام ناشناس گفتگوی اول برای آزمایش است.")
+
+    second_sender = await s.identity.add_user(111, 444, "فرستنده دوم")
+    group_id = (await s.identity.list_internal_groups(111))[0]["id"]
+    await s.identity.assign_internal_group_member(111, group_id, second_sender)
+    await s.identity.authenticate(444, started=True)
+    await s.begin(444, recipient.user_id, "criticism")
+    await s.submit_body(444, "پیام ناشناس گفتگوی دوم برای آزمایش است.")
+
+    active = await cs.active_chats(222)
+    assert len(active) == 2
+    assert len({item["label"] for item in active}) == 2
+    assert "همکار فرستنده" not in str(active) and "فرستنده دوم" not in str(active)
+
+    chat = ChatHarness(s.identity, s)
+    await chat.text("/start", 222)
+    await chat.click("گفتگوهای ناشناس", 222)
+    first, second = active
+    await chat.click(first["label"], 222)
+    await chat.text("پیام برای گفتگوی انتخاب‌شده اول است.", 222)
+    await chat.text("/start", 222)
+    await chat.click("گفتگوهای ناشناس", 222)
+    await chat.click(second["label"], 222)
+    await chat.text("پیام برای گفتگوی انتخاب‌شده دوم است.", 222)
+
+    async with s.database.transaction() as conn:
+        messages = s.tables["messages"]
+        for item in active:
+            assert (
+                await conn.scalar(
+                    select(func.count())
+                    .select_from(messages)
+                    .where(messages.c.conversation_id == item["id"])
+                )
+                == 2
+            )
 
 
 async def test_reply_double_click_and_rollback(feedback_service, monkeypatch):
@@ -190,17 +259,17 @@ async def test_ui_history_reply_restart_and_profile(feedback_service):
     await internal_conversation(s)
     chat = ChatHarness(s.identity, s)
     await chat.text("/start", 222)
-    await chat.click("گفتگوهای داخلی", 222)
-    await chat.click("دریافتی", 222)
+    await chat.click("گفتگوهای ناشناس", 222)
+    await chat.click("تاریخچه", 222)
+    await chat.click("آغازشده", 222)
     await chat.click("فرستنده ناشناس", 222)
-    await chat.click("پاسخ به گفتگو", 222)
+    await chat.click("ورود به گفتگوی ناشناس", 222)
     await chat.text(REPLY, 222)
-    token = chat.button("ارسال پاسخ")
+    assert "پیام ناشناس ارسال شد" in chat.latest[-1].text
     chat = ChatHarness(s.identity, s)
-    await chat.feed(callback_update(user_id=222, data=token))
-    assert REPLY in chat.latest[-1].text
     await chat.text("/start", 333)
-    await chat.click("گفتگوهای داخلی", 333)
+    await chat.click("گفتگوهای ناشناس", 333)
+    await chat.click("تاریخچه", 333)
     await chat.click("ارسالی", 333)
     await chat.click("همکار گیرنده", 333)
     await chat.click("پیام بعدی", 333)
