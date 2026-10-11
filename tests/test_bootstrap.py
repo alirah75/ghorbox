@@ -138,5 +138,8 @@ async def test_polling_closes_session_on_failure(settings, identity_service, mon
     monkeypatch.setattr("app.main.create_dispatcher", lambda *args: dispatcher)
     with pytest.raises(RuntimeError):
         await run_bot(settings)
+    bot.set_my_commands.assert_awaited_once()
+    commands = bot.set_my_commands.call_args.args[0]
+    assert [command.command for command in commands] == ["start", "cancel"]
     bot.session.close.assert_awaited_once()
     assert dispatcher.start_polling.call_args.kwargs["handle_as_tasks"] is False

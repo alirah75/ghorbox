@@ -22,11 +22,12 @@ async def statistics_callback(message, service, actor, token, action, payload):
             rows.append([("قبلی", "stats_archive", page - 1)])
         if len(reports) > 10:
             rows.append([("بعدی", "stats_archive", page + 1)])
+        rows.append([("🏠 منوی اصلی", "home", None)])
         await message.answer(
             "گزارش‌های هفتگی منتشرشده:"
             if reports
             else "هنوز گزارشی آماده نشده است. زمان‌بندی هر دقیقه بررسی می‌شود؛ برای منو /start",
-            reply_markup=await buttons(service, actor, rows) if rows else None,
+            reply_markup=await buttons(service, actor, rows),
         )
     else:
         result = await statistics.view(actor, payload["id"], payload["page"])
@@ -36,6 +37,7 @@ async def statistics_callback(message, service, actor, token, action, payload):
         if result["more"]:
             rows.append([("گیرندگان بعدی", "stats_view", {**payload, "page": payload["page"] + 1})])
         rows.append([("آرشیو گزارش‌ها", "stats_archive", 0)])
+        rows.append([("🏠 منوی اصلی", "home", None)])
         await message.answer(
             result["text"],
             parse_mode=None,

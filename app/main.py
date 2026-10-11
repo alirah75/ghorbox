@@ -5,6 +5,7 @@ from contextlib import suppress
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.types import BotCommand
 
 from app.bot.bootstrap import create_bootstrap_router
 from app.core.config import ConfigurationError, Settings, load_settings
@@ -60,6 +61,12 @@ async def _run_bot(settings: Settings) -> None:
         )
         dispatcher = create_dispatcher(service, feedback, external)
         await bot.get_me()
+        await bot.set_my_commands(
+            [
+                BotCommand(command="start", description="نمایش منوی اصلی"),
+                BotCommand(command="cancel", description="لغو عملیات و بازگشت به منوی اصلی"),
+            ]
+        )
         worker_task = asyncio.create_task(
             run_deliveries(DeliveryWorker(feedback, bot), DeliveryWorker(external, bot))
         )

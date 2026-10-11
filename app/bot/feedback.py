@@ -40,7 +40,10 @@ async def colleagues_page(message, service, actor_id, page=0, search=""):
         pages.append(("بعدی", "list", [page + 1, search]))
     if pages:
         rows.append(pages)
-    rows += [[("🔎 جستجوی همکار", "search", None)], [("❌ لغو", "cancel", None)]]
+    rows += [
+        [("🔎 جستجوی همکار", "search", None)],
+        [("🏠 منوی اصلی", "home", None)],
+    ]
     await message.answer(
         "همکار موردنظر را انتخاب کنید:" if colleagues else "همکاری یافت نشد.",
         reply_markup=await buttons(service, actor_id, rows),
@@ -75,7 +78,7 @@ async def handle_feedback_text(message, service):
     return True
 
 
-def create_feedback_router(service, cancel_admin, external=None):
+def create_feedback_router(service, cancel_admin, external=None, show_home=None):
     router = Router(name="internal_feedback")
     router.callback_query.filter(F.message.chat.type == "private")
 
@@ -150,7 +153,7 @@ def create_feedback_router(service, cancel_admin, external=None):
                                 ("🔴 انتقاد", "kind", [payload[0], "criticism"]),
                                 ("💡 پیشنهاد", "kind", [payload[0], "suggestion"]),
                             ],
-                            [("❌ لغو", "cancel", None)],
+                            [("🏠 منوی اصلی", "home", None)],
                         ],
                     ),
                 )
@@ -158,13 +161,17 @@ def create_feedback_router(service, cancel_admin, external=None):
                 await service.begin(actor_id, *payload)
                 await message.answer(
                     "متن بازخورد را بنویسید (۵ تا ۳۰۰۰ واحد متنی).\nبرای لغو /cancel",
-                    reply_markup=await buttons(service, actor_id, [[("❌ لغو", "cancel", None)]]),
+                    reply_markup=await buttons(
+                        service, actor_id, [[("🏠 منوی اصلی", "home", None)]]
+                    ),
                 )
             elif action == "search":
                 await service.begin_search(actor_id)
                 await message.answer("بخشی از نام همکار را بنویسید. برای لغو /cancel")
             elif action == "cancel":
                 await message.answer("عملیات لغو شد. برای منو /start را بفرستید.")
+            elif action == "home" and show_home is not None:
+                await show_home(message, actor_id)
             else:
                 raise InputError("دکمه نامعتبر است.")
         except (InputError, AccessDenied) as error:

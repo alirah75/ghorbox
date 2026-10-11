@@ -11,7 +11,7 @@ Suggested repository name: **`ghorbox`**.
 ## What it does — in 10 lines
 
 1. Only members registered and enabled by an administrator can use the bot.
-2. Administrators add members through Telegram's user picker; IDs are stored internally.
+2. Administrators add up to ten members at once through Telegram's user picker.
 3. Members select a colleague and write a criticism or suggestion.
 4. After the author writes the text, it is submitted directly without another confirmation.
 5. Recipients get the anonymous text as a direct Telegram bot notification.
@@ -23,7 +23,7 @@ Suggested repository name: **`ghorbox`**.
 
 ## Features
 
-- Persian Telegram interface, direct text submission, pre-compose cancellation and personal statistics.
+- Persian Telegram interface, bulk member selection, direct delivery and personal statistics.
 - Internal, external and full administrator roles; separate permission to manage administrators.
 - Three SQLite databases: identity, internal feedback and external feedback.
 - Encrypted content and routing, service-level authorization and a durable delivery queue.

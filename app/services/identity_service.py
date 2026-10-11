@@ -100,6 +100,21 @@ class IdentityService:
             return await repo.user_by_id(await repo.authenticate(actor_id), user_id)
 
     async def add_user(self, actor_id: int, telegram_id: int, name: str):
+        return (await self.add_users(actor_id, [(telegram_id, name)]))[0]
+
+    async def add_users(self, actor_id: int, selected_users):
+        if not isinstance(selected_users, (list, tuple)) or not 1 <= len(selected_users) <= 10:
+            raise InputError("بین ۱ تا ۱۰ کاربر را انتخاب کنید.")
+        normalized = []
+        seen = set()
+        for item in selected_users:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                raise InputError("اطلاعات کاربران انتخاب‌شده معتبر نیست.")
+            telegram_id, name = valid_id(item[0]), valid_name(item[1])
+            if telegram_id in seen:
+                raise InputError("یک کاربر بیش از یک‌بار انتخاب شده است.")
+            seen.add(telegram_id)
+            normalized.append((telegram_id, name))
         async with self.database.transaction(write=True) as conn:
             actor = await IdentityRepository(conn).authenticate(actor_id)
             actor.require("internal", "manage_users")
@@ -115,30 +130,36 @@ class IdentityService:
                 ).scalar_one_or_none()
                 if group_id is None:
                     raise InputError("ابتدا مدیر اصلی باید گروه داخلی شما را ایجاد کند.")
-            valid_id(telegram_id)
-            name = valid_name(name)
             users = self.tables["users"]
-            if (
-                await conn.execute(select(users.c.id).where(users.c.telegram_id == telegram_id))
-            ).first():
-                raise InputError("این شناسه قبلاً ثبت شده است؛ از فهرست کاربران استفاده کنید.")
-            user_id = uuid4().hex
-            await conn.execute(
-                users.insert().values(id=user_id, telegram_id=telegram_id, display_name=name)
-            )
-            if group_id is not None:
+            existing = (
                 await conn.execute(
-                    self.tables["internal_group_memberships"]
-                    .insert()
-                    .values(
-                        id=uuid4().hex,
-                        group_id=group_id,
-                        user_id=user_id,
-                        assigned_by_admin_id=actor.admin_id,
+                    select(users.c.telegram_id).where(
+                        users.c.telegram_id.in_([item[0] for item in normalized])
                     )
                 )
-            await self._audit(conn, actor.admin_id, "add_user", user_id)
-            return user_id
+            ).first()
+            if existing:
+                raise InputError("این شناسه قبلاً ثبت شده است؛ از فهرست کاربران استفاده کنید.")
+            user_ids = []
+            for telegram_id, name in normalized:
+                user_id = uuid4().hex
+                user_ids.append(user_id)
+                await conn.execute(
+                    users.insert().values(id=user_id, telegram_id=telegram_id, display_name=name)
+                )
+                if group_id is not None:
+                    await conn.execute(
+                        self.tables["internal_group_memberships"]
+                        .insert()
+                        .values(
+                            id=uuid4().hex,
+                            group_id=group_id,
+                            user_id=user_id,
+                            assigned_by_admin_id=actor.admin_id,
+                        )
+                    )
+                await self._audit(conn, actor.admin_id, "add_user", user_id)
+            return user_ids
 
     async def update_user(self, actor_id: int, user_id: str, *, active=None, name=None):
         async with self.database.transaction(write=True) as conn:

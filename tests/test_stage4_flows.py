@@ -3,11 +3,24 @@ from unittest.mock import AsyncMock
 import pytest
 from aiogram.types import ReplyKeyboardMarkup
 
+from app.bot.bootstrap import READY
 from app.core.permissions import AccessDenied
 from app.workers.delivery import DeliveryWorker
 from tests.test_admin_flows import ChatHarness
 from tests.test_bootstrap import callback_update, message_update
 from tests.test_feedback import BODY, count
+
+
+async def test_nested_feedback_and_conversation_menus_return_home(feedback_service):
+    chat = ChatHarness(feedback_service.identity, feedback_service)
+    await chat.text("/start", user=333)
+    await chat.click("داخل گروه", user=333)
+    await chat.click("منوی اصلی", user=333)
+    assert chat.latest[-1].text == READY
+
+    await chat.click("گفتگوهای ناشناس", user=333)
+    await chat.click("منوی اصلی", user=333)
+    assert chat.latest[-1].text == READY
 
 
 async def test_contact_picker_rejects_wrong_request_and_rechecks_permissions(identity_service):
@@ -18,7 +31,7 @@ async def test_contact_picker_rejects_wrong_request_and_rechecks_permissions(ide
     request = chat.latest[-1].reply_markup
     assert isinstance(request, ReplyKeyboardMarkup)
     picker = request.keyboard[0][0].request_users
-    assert picker.user_is_bot is False and picker.max_quantity == 1
+    assert picker.user_is_bot is False and picker.max_quantity == 10
     assert not picker.request_username and not picker.request_photo
     await chat.feed(
         message_update(

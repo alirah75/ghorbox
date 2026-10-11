@@ -57,6 +57,7 @@ async def menu(message, service, actor_id):
             [("⚙️ مدیریت افراد خارجی", "manage", [0, ""])],
             [("📋 پیشنهادهای افراد جدید", "proposals", 0)],
         ]
+    rows.append([("🏠 منوی اصلی", "home", None)])
     await message.answer(
         "بخش خارج از گروه\nبازخورد در صندوق مدیران این بخش ثبت می‌شود؛ "
         "مستقیماً به فرد خارجی پیام نمی‌فرستیم.",
@@ -119,7 +120,7 @@ async def handle_external_text(message, service):
     return True
 
 
-def create_external_router(service, cancel_admin, internal=None):
+def create_external_router(service, cancel_admin, internal=None, show_home=None):
     router = Router(name="external")
     router.callback_query.filter(F.message.chat.type == "private")
 
@@ -167,6 +168,8 @@ def create_external_router(service, cancel_admin, internal=None):
                 await menu(message, service, actor)
             elif action == "menu":
                 await menu(message, service, actor)
+            elif action == "home" and show_home is not None:
+                await show_home(message, actor)
             elif action in {"list", "manage"}:
                 await people_page(message, service, actor, *payload, management=action == "manage")
             elif action == "target":

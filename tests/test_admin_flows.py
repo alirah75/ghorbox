@@ -43,6 +43,9 @@ class ChatHarness:
         return await self.feed(callback_update(user_id=user, data=self.button(label)))
 
     async def pick(self, number, name, user=111):
+        return await self.pick_many([(number, name)], user)
+
+    async def pick_many(self, selected_users, user=111):
         request = next(
             item
             for item in reversed(self.latest)
@@ -55,7 +58,9 @@ class ChatHarness:
                 text=None,
                 users_shared={
                     "request_id": request_id,
-                    "users": [{"user_id": number, "first_name": name}],
+                    "users": [
+                        {"user_id": number, "first_name": name} for number, name in selected_users
+                    ],
                 },
             )
         )
@@ -94,6 +99,24 @@ async def test_complete_add_disable_enable_user_flow(identity_service):
         for row in chat.latest[-1].reply_markup.inline_keyboard
         for button in row
     )
+
+
+async def test_bulk_add_users_with_one_confirmation(identity_service):
+    chat = ChatHarness(identity_service)
+    await chat.text("/admin")
+    await chat.click("کاربران")
+    await chat.click("افزودن کاربر")
+    request = chat.latest[-1].reply_markup.keyboard[0][0].request_users
+    assert request.max_quantity == 10
+    await chat.pick_many([(222, "کاربر اول"), (333, "کاربر دوم")])
+    assert "2 کاربر" in chat.latest[-1].text
+    with pytest.raises(AccessDenied):
+        await identity_service.authenticate(222)
+    with pytest.raises(AccessDenied):
+        await identity_service.authenticate(333)
+    await chat.click("تأیید")
+    assert (await identity_service.authenticate(222)).display_name == "کاربر اول"
+    assert (await identity_service.authenticate(333)).display_name == "کاربر دوم"
 
 
 async def test_admin_role_confirmation_and_internal_panel(identity_service):

@@ -424,6 +424,7 @@ def create_bootstrap_router(service: IdentityService, feedback=None, external=No
             await notice(message, actor_id, "وضعیت کاربر ذخیره شد.")
         elif action in {"add_user", "add_admin"}:
             actor.require(*(MANAGE_USERS if action == "add_user" else MANAGE_ADMINS))
+            multiple = action == "add_user"
             request_id = secrets.randbelow(2**31 - 1) + 1
             nav.set_form(
                 actor_id,
@@ -431,16 +432,25 @@ def create_bootstrap_router(service: IdentityService, feedback=None, external=No
                 {"request_id": request_id},
             )
             await message.answer(
-                "از دکمه زیر، شخص موردنظر را در تلگرام انتخاب کنید.\nبرای لغو /cancel",
+                (
+                    "از دکمه زیر، یک تا ده کاربر را در تلگرام انتخاب کنید."
+                    if multiple
+                    else "از دکمه زیر، شخص موردنظر را در تلگرام انتخاب کنید."
+                )
+                + "\nبرای لغو /cancel",
                 reply_markup=ReplyKeyboardMarkup(
                     keyboard=[
                         [
                             KeyboardButton(
-                                text="👤 انتخاب کاربر تلگرام",
+                                text=(
+                                    "👥 انتخاب کاربران تلگرام"
+                                    if multiple
+                                    else "👤 انتخاب کاربر تلگرام"
+                                ),
                                 request_users=KeyboardButtonRequestUsers(
                                     request_id=request_id,
                                     user_is_bot=False,
-                                    max_quantity=1,
+                                    max_quantity=10 if multiple else 1,
                                     request_name=True,
                                     request_username=False,
                                     request_photo=False,
@@ -465,6 +475,13 @@ def create_bootstrap_router(service: IdentityService, feedback=None, external=No
         elif action == "save_user":
             await service.add_user(actor_id, payload[0], payload[1])
             await notice(message, actor_id, "✅ کاربر ثبت شد. اکنون می‌تواند ربات را Start کند.")
+        elif action == "save_users":
+            user_ids = await service.add_users(actor_id, payload)
+            await notice(
+                message,
+                actor_id,
+                f"✅ {len(user_ids)} کاربر ثبت شدند. اکنون می‌توانند ربات را Start کنند.",
+            )
         elif action == "save_name":
             await service.update_user(actor_id, payload[0], name=payload[1])
             await notice(message, actor_id, "نام ذخیره شد.")
@@ -548,15 +565,21 @@ def create_bootstrap_router(service: IdentityService, feedback=None, external=No
             if (
                 shared is None
                 or shared.request_id != payload["request_id"]
-                or len(shared.users) != 1
+                or not shared.users
+                or len(shared.users) > (10 if action == "pick_user" else 1)
             ):
                 raise InputError("از دکمه انتخاب کاربر تلگرام استفاده کنید؛ برای لغو /cancel")
-            selected = shared.users[0]
-            telegram_id = valid_id(selected.user_id)
+            selected_users = []
+            for selected in shared.users:
+                telegram_id = valid_id(selected.user_id)
+                name = " ".join(part for part in [selected.first_name, selected.last_name] if part)
+                selected_users.append([telegram_id, name])
             nav.forms.pop(actor_id, None)
-            await message.answer("کاربر انتخاب شد.", reply_markup=ReplyKeyboardRemove())
-            name = " ".join(part for part in [selected.first_name, selected.last_name] if part)
+            await message.answer(
+                f"{len(selected_users)} کاربر انتخاب شد.", reply_markup=ReplyKeyboardRemove()
+            )
             if action == "pick_admin":
+                telegram_id, _ = selected_users[0]
                 registered_name = await service.admin_candidate(actor_id, telegram_id)
                 rows = [
                     [(label, "role", [telegram_id, role, manager, registered_name])]
@@ -568,14 +591,31 @@ def create_bootstrap_router(service: IdentityService, feedback=None, external=No
                 rows.append([("❌ لغو", "home", None)])
                 await message.answer("نقش را انتخاب کنید:", reply_markup=keyboard(actor_id, rows))
                 return
-            try:
-                name = valid_name(name)
-            except InputError:
-                nav.set_form(actor_id, "user_name", telegram_id)
-                await notice(message, actor_id, "نام نمایشی این کاربر را بنویسید.")
-                return
+            if len(selected_users) == 1:
+                telegram_id, name = selected_users[0]
+                try:
+                    name = valid_name(name)
+                except InputError:
+                    nav.set_form(actor_id, "user_name", telegram_id)
+                    await notice(message, actor_id, "نام نمایشی این کاربر را بنویسید.")
+                    return
+                selected_users[0][1] = name
+            else:
+                try:
+                    selected_users = [
+                        [telegram_id, valid_name(name)] for telegram_id, name in selected_users
+                    ]
+                except InputError:
+                    raise InputError(
+                        "نام یکی از کاربران دریافت نشد؛ کاربران را دوباره انتخاب کنید."
+                    ) from None
+            names = "\n".join(f"• {name}" for _, name in selected_users)
             await confirm(
-                message, actor_id, f"افزودن کاربر: {name}", "save_user", [telegram_id, name]
+                message,
+                actor_id,
+                f"افزودن {len(selected_users)} کاربر:\n{names}",
+                "save_users",
+                selected_users,
             )
             return
         if message.text is None:
@@ -691,9 +731,9 @@ def create_bootstrap_router(service: IdentityService, feedback=None, external=No
     if feedback is not None:
         from app.bot.feedback import create_feedback_router
 
-        router.include_router(create_feedback_router(feedback, nav.cancel, external))
+        router.include_router(create_feedback_router(feedback, nav.cancel, external, home))
     if external is not None:
         from app.bot.external import create_external_router
 
-        router.include_router(create_external_router(external, nav.cancel, feedback))
+        router.include_router(create_external_router(external, nav.cancel, feedback, home))
     return router

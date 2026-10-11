@@ -27,7 +27,12 @@ async def moderation_callback(message, service, actor_id, token, action, payload
         await message.answer(
             title,
             reply_markup=await buttons(
-                service, actor_id, [[("📥 بازخوردهای اولیه", "mod_feedback", 0)]]
+                service,
+                actor_id,
+                [
+                    [("📥 بازخوردهای اولیه", "mod_feedback", 0)],
+                    [("🏠 منوی اصلی", "home", None)],
+                ],
             ),
         )
     elif action == "mod_feedback":

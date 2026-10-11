@@ -111,6 +111,7 @@ async def conversation_callback(message, service, actor, token, action, payload)
         if pages:
             rows.append(pages)
         rows.append([("📚 تاریخچه گفتگوها", "history_menu", None)])
+        rows.append([("🏠 منوی اصلی", "home", None)])
         await message.answer(
             "گفتگوی فعال را انتخاب کنید؛ گفتگوهای دیگر باز می‌مانند."
             if items
@@ -127,6 +128,7 @@ async def conversation_callback(message, service, actor, token, action, payload)
                     [("💬 گفتگوهای فعال", "chat_list", 0)],
                     [("📤 بازخوردهای ارسالی من", "history", ["sent", 0])],
                     [("📩 گفتگوهای آغازشده توسط دیگران", "history", ["received", 0])],
+                    [("🏠 منوی اصلی", "home", None)],
                 ],
             ),
         )

@@ -66,6 +66,20 @@ async def test_internal_manager_sees_only_own_members_and_new_users_are_assigned
     assert (await service.list_internal_group_members(333, second_group))[0]["id"] == other_member
 
 
+async def test_internal_manager_bulk_add_assigns_every_user_atomically(identity_service):
+    service = identity_service
+    manager_id = await _internal_manager(service, 222, "مدیر افزودن گروهی")
+    group_id = await service.create_internal_group(111, "گروه افزودن گروهی", manager_id)
+    user_ids = await service.add_users(222, [(333, "عضو اول"), (444, "عضو دوم"), (555, "عضو سوم")])
+    members = await service.list_internal_group_members(222, group_id)
+    assert {item["id"] for item in members} == set(user_ids)
+
+    with pytest.raises(InputError):
+        await service.add_users(222, [(666, "عضو چهارم"), (333, "عضو تکراری")])
+    with pytest.raises(AccessDenied):
+        await service.authenticate(666)
+
+
 async def test_group_requires_unique_internal_manager_and_ordinary_members(identity_service):
     service = identity_service
     manager_id = await _internal_manager(service, 222, "مدیر داخلی")
